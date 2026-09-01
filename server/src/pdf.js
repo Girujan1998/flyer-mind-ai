@@ -1,10 +1,13 @@
 import * as mupdf from 'mupdf';
 
-// Matches the browser renderer in repos/SandboxDemos/flyer-ocr-extractor
-// (src/lib/pdf.js): cap the long edge at 1600 px, never upscale past 2x, JPEG.
-const MAX_DIMENSION = 1600;
-const MAX_SCALE = 2.0;
-const JPEG_QUALITY = 82;
+// Render pages large enough for Gemini to read superscript cents, SKU numbers
+// and pack sizes — the small text is where the misreads come from. ~2000 px on
+// the long edge is Gemini's document sweet spot; MAX_DIMENSION guards oversized
+// pages. (flyer-ocr-extractor used 1600 / 2x, which for a Letter page capped at
+// ~1224 px — too small for the fine print.)
+const MAX_DIMENSION = 2400;
+const MAX_SCALE = 2.6;
+const JPEG_QUALITY = 85;
 
 // Runaway guard for an absurdly long PDF; real flyers are far under it.
 const DEFAULT_MAX_PAGES = 200;

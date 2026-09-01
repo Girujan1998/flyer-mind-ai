@@ -14,12 +14,18 @@ type Props = {
   onPress: (product: Product) => void;
 };
 
+/** Below this the model isn't sure it read the tile right — flag for review. */
+const LOW_CONFIDENCE = 55;
+
 function ProductCard({
   product,
   page,
   width,
   onPress,
 }: Props): React.JSX.Element {
+  const lowConfidence =
+    product.confidence != null && product.confidence < LOW_CONFIDENCE;
+
   return (
     <Pressable
       accessibilityRole="button"
@@ -36,6 +42,13 @@ function ProductCard({
         ) : (
           <Text style={styles.noImage}>no image</Text>
         )}
+        {lowConfidence ? (
+          <View
+            style={styles.badge}
+            accessibilityLabel={`Low confidence (${product.confidence}) — check this one`}>
+            <Text style={styles.badgeText}>?</Text>
+          </View>
+        ) : null}
       </View>
       <View style={styles.body}>
         <Text style={styles.name} numberOfLines={2}>
@@ -73,6 +86,18 @@ const styles = StyleSheet.create({
     backgroundColor: '#fff',
   },
   noImage: {color: colors.textMuted, fontSize: 12},
+  badge: {
+    position: 'absolute',
+    top: 6,
+    right: 6,
+    width: 20,
+    height: 20,
+    borderRadius: 10,
+    backgroundColor: colors.danger,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  badgeText: {color: '#fff', fontSize: 12, fontWeight: '800', lineHeight: 14},
   body: {padding: spacing.sm, gap: 4},
   name: {color: colors.text, fontSize: 13, fontWeight: '600', lineHeight: 17},
   metaRow: {

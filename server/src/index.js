@@ -29,7 +29,8 @@ app.get('/health', (_req, res) => {
  * POST /flyers/extract   (multipart/form-data, field "file" = the flyer PDF)
  *
  * -> { pages:    [{ page, width, height, image }]   image = data:image/jpeg;base64,...
- *      products: [{ id, page, name, price, priceValue, info, box }]  box = [ymin,xmin,ymax,xmax] 0-1000
+ *      products: [{ id, page, name, price, priceValue, info, box, confidence }]
+ *                box = [ymin,xmin,ymax,xmax] 0-1000 · confidence = 0-100 (self-rated)
  *      usage:    {...}
  *      meta:     { totalPages, renderedPages } }
  */

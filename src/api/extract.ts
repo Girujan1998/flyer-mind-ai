@@ -21,6 +21,8 @@ export type Product = {
   /** Size / pack detail, e.g. "Each. Product of Canada." */
   info: string;
   box: GeminiBox | null;
+  /** Model's 0-100 self-rated confidence in name/price/box; null if not reported. */
+  confidence: number | null;
 };
 
 export type FlyerPage = {

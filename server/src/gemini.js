@@ -37,22 +37,35 @@ one page and is preceded by a line like "=== PAGE 3 ===" giving its page number.
 Extract EVERY distinct product across ALL pages shown into one JSON array — be
 exhaustive, do not skip items even on a crowded page, do not stop early.`;
 
-const PROMPT_FIELDS = `For each product:
+const PROMPT_FIELDS = `Flyer tiles sit close together. Read every field for a product ONLY from text
+that is physically inside that product's own tile — never borrow the name,
+price, size or SKU from a neighbouring tile. If a field is not clearly inside
+this tile, leave it empty / 0 rather than guessing.
+
+For each product:
 - "page": the page number (from the "=== PAGE N ===" label) the product appears on.
 - "name": the product name exactly as printed (brand + product line, e.g.
   "Great Value bacon", "Silk Almond, Cashew or Protein soy beverage"). Copy the
   printed text; do not summarise or turn it into a category.
-- "priceValue": the price as a NUMBER in dollars. Flyers print the cents as a
-  small superscript next to a large dollar figure — you MUST place the decimal
-  point: a big "29" with a superscript "97" is 29.97, NOT 2997. "$13" + "96" is
-  13.96. "34¢" is 0.34. "$3.17/lb" is 3.17. If there is no price, use 0.
+- "priceValue": the price as a NUMBER in dollars. Look carefully at each digit
+  (a bold "3" and "7" are easy to confuse in flyer fonts). Flyers print the
+  cents as a small superscript next to a large dollar figure — the LARGE digits
+  are whole dollars, the small raised digits immediately after are the two-digit
+  cents: a big "29" with a superscript "97" is 29.97, NOT 2997. "$13" + "96" is
+  13.96. "34¢" is 0.34. "$3.17/lb" is 3.17. If there is no price, use 0. If the
+  tile shows a struck-through "was" price and a current price, use the current one.
 - "price": the same price formatted as text, with the decimal and any unit —
   "$29.97", "$13.96", "34¢", "$3.17/lb", "$1.97 each". Never write it as a run of
   digits with no separator.
-- "info": size / quantity / pack / promo detail near the product ("375 g",
-  "6 x 591 mL", "Selected varieties"). Empty string if none.
-- "box": the product tile's bounding box [ymin, xmin, ymax, xmax], each 0-1000,
-  normalised to THAT product's page image. Include the photo and the text block.
+- "info": size / quantity / pack / promo detail printed INSIDE this tile ("375 g",
+  "6 x 591 mL", "Selected varieties"). Empty string if none is inside this tile.
+- "box": this product tile's bounding box [ymin, xmin, ymax, xmax], each 0-1000,
+  normalised to THAT product's page image. It must tightly enclose ONLY this one
+  product — its photo and its own text block — and not spill into the tiles
+  beside it.
+- "confidence": integer 0-100, how sure you are that name, price and box are all
+  correct for THIS product. Lower it when digits are ambiguous, the tile is small
+  or crowded, or text could belong to a neighbour.
 
 Return [] if there are no products.`;
 
@@ -67,8 +80,9 @@ const RESPONSE_SCHEMA = {
       price: {type: 'STRING'},
       info: {type: 'STRING'},
       box: {type: 'ARRAY', items: {type: 'NUMBER'}},
+      confidence: {type: 'INTEGER'},
     },
-    required: ['page', 'name', 'priceValue', 'price', 'info', 'box'],
+    required: ['page', 'name', 'priceValue', 'price', 'info', 'box', 'confidence'],
   },
 };
 
@@ -190,8 +204,10 @@ async function extractBatch(batch, apiKey, model) {
         temperature: 0,
         responseMimeType: 'application/json',
         responseSchema: RESPONSE_SCHEMA,
-        thinkingConfig: {thinkingBudget: 0},
-        maxOutputTokens: Math.min(65536, 5000 * batch.length + 6000),
+        // Dynamic thinking — let the model reason about ambiguous digits and
+        // which tile a piece of text belongs to, instead of snap-guessing.
+        thinkingConfig: {thinkingBudget: -1},
+        maxOutputTokens: Math.min(65536, 6000 * batch.length + 8000),
       },
     },
     apiKey,
@@ -222,6 +238,7 @@ async function extractBatch(batch, apiKey, model) {
     }
     const priceValue =
       typeof p.priceValue === 'number' ? p.priceValue : Number(p.priceValue);
+    const confidence = Number(p.confidence);
     return {
       page,
       name: (p.name || '').toString().trim(),
@@ -230,6 +247,9 @@ async function extractBatch(batch, apiKey, model) {
       info: (p.info || '').toString().trim(),
       box:
         Array.isArray(p.box) && p.box.length === 4 ? p.box.map(Number) : null,
+      confidence: isFinite(confidence)
+        ? Math.max(0, Math.min(100, Math.round(confidence)))
+        : null,
     };
   });
 
@@ -260,18 +280,21 @@ export async function extractFlyer(pages) {
           price: '$3.99',
           priceValue: 3.99,
           info: 'each',
+          confidence: 92,
         },
         {
           name: 'Mock Product B',
           price: '$1.49',
           priceValue: 1.49,
           info: '500 g',
+          confidence: 88,
         },
         {
           name: 'Mock Product C',
           price: '$8.97',
           priceValue: 8.97,
           info: 'Selected varieties',
+          confidence: 41,
         },
       ].map((m, j) => ({
         id: `${p.page}-${j}`,
