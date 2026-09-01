@@ -28,6 +28,7 @@ xcodebuild \
   -destination 'generic/platform=iOS' \
   -derivedDataPath "$DERIVED" \
   CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" CODE_SIGN_ENTITLEMENTS="" \
+  ENABLE_BITCODE=NO \
   build
 
 APP="$DERIVED/Build/Products/Release-iphoneos/${SCHEME}.app"
