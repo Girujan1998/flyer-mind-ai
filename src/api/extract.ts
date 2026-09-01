@@ -12,69 +12,101 @@ export type GeminiBox = [number, number, number, number];
 
 export type Product = {
   id: string;
+  flyerId: string;
   page: number;
   name: string;
   /** Display price string, e.g. "34¢" or "$5.44". */
   price: string;
-  /** Price as a number so a superscript "5⁴⁴" can't come back as 544; null if unknown. */
+  /** Price as a number; null if unknown. */
   priceValue: number | null;
   /** Size / pack detail, e.g. "Each. Product of Canada." */
   info: string;
   box: GeminiBox | null;
-  /** Model's 0-100 self-rated confidence in name/price/box; null if not reported. */
+  /** Model's 0-100 self-rated confidence; null if not reported. */
   confidence: number | null;
 };
 
 export type FlyerPage = {
+  flyerId: string;
   page: number;
   /** Pixel size of `image` — bounding boxes are placed against this. */
   width: number;
   height: number;
-  /** data:image/jpeg;base64,... of the rasterized page. */
+  /** Absolute URL of the rasterized page JPEG. */
   image: string;
 };
 
-export type ExtractResult = {
-  pages: FlyerPage[];
-  products: Product[];
-  meta?: {totalPages: number; renderedPages: number; failedPages?: number[]};
-};
+/** Key a page (or a product's page) in a lookup map. */
+export const pageKey = (flyerId: string, page: number) => `${flyerId}:${page}`;
 
 export class NoServerError extends Error {}
 
+async function api<T>(path: string, init?: RequestInit): Promise<T> {
+  let response: Response;
+  try {
+    response = await fetch(`${API_BASE_URL}${path}`, init);
+  } catch {
+    throw new NoServerError(
+      `Can't reach the extraction server at ${API_BASE_URL}. Is it running?`,
+    );
+  }
+  const data = (await response.json().catch(() => null)) as
+    | (T & {error?: string})
+    | null;
+  if (!response.ok || !data) {
+    throw new Error(data?.error || `Request failed (${response.status})`);
+  }
+  return data;
+}
+
+export type UploadResult = {
+  flyerId: string;
+  name: string;
+  savedProducts: number;
+  renderedPages: number;
+  totalPages: number;
+  failedPages: number[];
+  /** true when this exact PDF was already stored — not re-extracted. */
+  reused: boolean;
+};
+
 /**
- * Upload a flyer PDF to the extraction API (`server/`), which rasterizes each
- * page and runs Gemini vision, and get back `{ pages, products }`.
- * Same pipeline as the flyer-ocr-extractor project.
+ * Upload a flyer PDF. The server rasterizes each page, runs Gemini vision, and
+ * SAVES the products + bounding boxes to its database. Returns a summary only —
+ * browse the products on the Search screen.
  */
-export async function extractFlyer(file: SelectedPdf): Promise<ExtractResult> {
+export function extractFlyer(file: SelectedPdf): Promise<UploadResult> {
   const form = new FormData();
   form.append('file', {
     uri: file.uri,
     name: file.name || 'flyer.pdf',
     type: file.mimeType || 'application/pdf',
   } as unknown as Blob);
+  return api<UploadResult>('/flyers/extract', {method: 'POST', body: form});
+}
 
-  let response: Response;
-  try {
-    response = await fetch(`${API_BASE_URL}/flyers/extract`, {
-      method: 'POST',
-      body: form,
-    });
-  } catch {
-    throw new NoServerError(
-      `Can't reach the extraction server at ${API_BASE_URL}. Is it running?`,
-    );
-  }
+export type SearchResult = {
+  products: Product[];
+  pages: FlyerPage[];
+  total: number;
+  hasMore: boolean;
+};
 
-  const data = (await response.json().catch(() => null)) as
-    | (ExtractResult & {error?: string})
-    | null;
-
-  if (!response.ok || !data) {
-    throw new Error(data?.error || `Extraction failed (${response.status})`);
-  }
-  return {pages: data.pages, products: data.products, meta: data.meta};
+/** Paginated + text search over every stored product, newest first. */
+export function searchProducts(params: {
+  q?: string;
+  limit?: number;
+  offset?: number;
+}): Promise<SearchResult> {
+  // RN's URLSearchParams polyfill has no `.set()`, so build the string by hand.
+  const qs = [
+    `limit=${params.limit ?? 20}`,
+    `offset=${params.offset ?? 0}`,
+    params.q ? `q=${encodeURIComponent(params.q)}` : '',
+  ]
+    .filter(Boolean)
+    .join('&');
+  return api<SearchResult>(`/products?${qs}`);
 }
 
 /** Convert a Gemini box to a pixel rect on the page, padded and clamped. */

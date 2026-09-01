@@ -1,11 +1,23 @@
 import './loadEnv.js';
 import './logger.js';
 
+import {createHash} from 'node:crypto';
 import {networkInterfaces} from 'node:os';
 
 import cors from 'cors';
 import express from 'express';
 import multer from 'multer';
+
+import {
+  PAGES_DIR,
+  findFlyerByHash,
+  productCountForFlyer,
+  saveExtraction,
+  searchProducts,
+  totalProducts,
+} from './db.js';
+import {extractFlyer} from './gemini.js';
+import {renderPdf} from './pdf.js';
 
 /** First non-internal IPv4 address — the one a phone on the same Wi-Fi uses. */
 function lanAddress() {
@@ -18,9 +30,6 @@ function lanAddress() {
   }
   return null;
 }
-
-import {extractFlyer} from './gemini.js';
-import {renderPdf} from './pdf.js';
 
 const PORT = process.env.PORT || 3001;
 const MAX_UPLOAD_BYTES = 40 * 1024 * 1024;
@@ -49,21 +58,28 @@ app.use((req, res, next) => {
   next();
 });
 
+// Rendered page images: /pages/<flyerId>/<page>.jpg
+app.use('/pages', express.static(PAGES_DIR, {immutable: true, maxAge: '30d'}));
+
+const pageUrl = req => (flyerId, page) =>
+  `${req.protocol}://${req.get('host')}/pages/${flyerId}/${page}.jpg`;
+
 app.get('/health', (_req, res) => {
   res.json({
     ok: true,
     gemini: process.env.GEMINI_API_KEY ? 'configured' : 'missing',
+    products: totalProducts(),
   });
 });
 
 /**
  * POST /flyers/extract   (multipart/form-data, field "file" = the flyer PDF)
  *
- * -> { pages:    [{ page, width, height, image }]   image = data:image/jpeg;base64,...
- *      products: [{ id, page, name, price, priceValue, info, box, confidence }]
- *                box = [ymin,xmin,ymax,xmax] 0-1000 · confidence = 0-100 (self-rated)
- *      usage:    {...}
- *      meta:     { totalPages, renderedPages } }
+ * Renders + Gemini-extracts the flyer, SAVES products/pages/boxes to the DB,
+ * and returns only a summary (the products live in the DB, seen via /products):
+ *   { flyerId, name, savedProducts, renderedPages, totalPages, failedPages, reused }
+ *
+ * If this exact PDF was uploaded before (same sha256), it is not re-extracted.
  */
 app.post('/flyers/extract', upload.single('file'), async (req, res) => {
   try {
@@ -76,6 +92,21 @@ app.post('/flyers/extract', upload.single('file'), async (req, res) => {
       return res
         .status(415)
         .json({error: `Expected a PDF, got "${req.file.mimetype}".`});
+    }
+
+    const hash = createHash('sha256').update(req.file.buffer).digest('hex');
+    const existing = findFlyerByHash(hash);
+    if (existing) {
+      console.log(`[extract] ${req.file.originalname} — already stored, skipping Gemini`);
+      return res.json({
+        flyerId: existing.id,
+        name: existing.name,
+        savedProducts: productCountForFlyer(existing.id),
+        renderedPages: existing.rendered_pages,
+        totalPages: existing.total_pages,
+        failedPages: [],
+        reused: true,
+      });
     }
 
     const maxPages = req.query.maxpages
@@ -99,31 +130,53 @@ app.post('/flyers/extract', upload.single('file'), async (req, res) => {
       rendered.pages.map(p => ({page: p.page, jpeg: p.jpegBase64})),
     );
 
+    const {flyerId, savedProducts} = saveExtraction({
+      name: req.file.originalname || 'flyer.pdf',
+      hash,
+      totalPages: rendered.totalPages,
+      renderedPages: rendered.renderedPages,
+      pages: rendered.pages,
+      products,
+    });
+
     console.log(
       `[extract] ${req.file.originalname} — ${rendered.renderedPages} page(s), ` +
-        `${products.length} product(s), ${((Date.now() - t0) / 1000).toFixed(
+        `${savedProducts} product(s) saved, ${((Date.now() - t0) / 1000).toFixed(
           1,
         )}s`,
     );
 
     res.json({
-      pages: rendered.pages.map(p => ({
-        page: p.page,
-        width: p.width,
-        height: p.height,
-        image: `data:image/jpeg;base64,${p.jpegBase64}`,
-      })),
-      products,
-      usage,
-      meta: {
-        totalPages: rendered.totalPages,
-        renderedPages: rendered.renderedPages,
-        failedPages: usage.failedPages ?? [],
-      },
+      flyerId,
+      name: req.file.originalname || 'flyer.pdf',
+      savedProducts,
+      renderedPages: rendered.renderedPages,
+      totalPages: rendered.totalPages,
+      failedPages: usage.failedPages ?? [],
+      reused: false,
     });
   } catch (err) {
     console.error('[extract] failed:', err);
     res.status(500).json({error: err?.message || 'Extraction failed'});
+  }
+});
+
+/**
+ * GET /products?q=<text>&limit=20&offset=0
+ *   -> { products: [{ id, flyerId, page, name, price, priceValue, info, box, confidence }],
+ *        pages:    [{ flyerId, page, width, height, image }],   image = absolute URL
+ *        total, hasMore }
+ */
+app.get('/products', (req, res) => {
+  try {
+    const result = searchProducts(
+      {q: req.query.q, limit: req.query.limit, offset: req.query.offset},
+      pageUrl(req),
+    );
+    res.json(result);
+  } catch (err) {
+    console.error('[products] failed:', err);
+    res.status(500).json({error: err?.message || 'Query failed'});
   }
 });
 
@@ -134,6 +187,7 @@ app.listen(PORT, () => {
     console.log(`  on this network (for a phone): http://${lan}:${PORT}`);
     console.log(`  → set LAN_HOST to "${lan}" in src/config.ts`);
   }
+  console.log(`  stored products: ${totalProducts()}`);
   if (!process.env.GEMINI_API_KEY) {
     console.warn(
       '  ⚠  GEMINI_API_KEY is not set — copy server/.env.example to server/.env',

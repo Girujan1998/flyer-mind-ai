@@ -1,8 +1,6 @@
-import React, {useMemo, useState} from 'react';
+import React, {useState} from 'react';
 import {
   ActivityIndicator,
-  Dimensions,
-  FlatList,
   Pressable,
   StyleSheet,
   Text,
@@ -11,24 +9,17 @@ import {
 import DocumentPicker, {isCancel, types} from 'react-native-document-picker';
 
 import {
-  ExtractResult,
   NoServerError,
-  Product,
   SelectedPdf,
+  UploadResult,
   extractFlyer,
 } from '../api/extract';
-import ProductCard from '../components/ProductCard';
-import SourcePageModal from '../components/SourcePageModal';
 import {colors, radius, spacing} from '../theme';
-
-const GAP = spacing.sm;
-const COLUMN_WIDTH =
-  (Dimensions.get('window').width - spacing.md * 2 - GAP) / 2;
 
 type Phase =
   | {kind: 'idle'}
-  | {kind: 'extracting'}
-  | {kind: 'done'; result: ExtractResult}
+  | {kind: 'uploading'}
+  | {kind: 'done'; result: UploadResult}
   | {kind: 'error'; message: string};
 
 function formatBytes(bytes: number): string {
@@ -44,14 +35,6 @@ function formatBytes(bytes: number): string {
 function UploadScreen(): React.JSX.Element {
   const [file, setFile] = useState<SelectedPdf | null>(null);
   const [phase, setPhase] = useState<Phase>({kind: 'idle'});
-  const [selected, setSelected] = useState<Product | null>(null);
-
-  const pagesByNumber = useMemo(() => {
-    if (phase.kind !== 'done') {
-      return new Map<number, ExtractResult['pages'][number]>();
-    }
-    return new Map(phase.result.pages.map(p => [p.page, p]));
-  }, [phase]);
 
   const selectPdf = async () => {
     try {
@@ -83,10 +66,11 @@ function UploadScreen(): React.JSX.Element {
     if (!file) {
       return;
     }
-    setPhase({kind: 'extracting'});
+    setPhase({kind: 'uploading'});
     try {
       const result = await extractFlyer(file);
       setPhase({kind: 'done', result});
+      setFile(null);
     } catch (err) {
       setPhase({
         kind: 'error',
@@ -95,63 +79,40 @@ function UploadScreen(): React.JSX.Element {
             ? err.message
             : err instanceof Error
             ? err.message
-            : 'Extraction failed',
+            : 'Upload failed',
       });
     }
   };
 
-  const reset = () => {
-    setFile(null);
-    setPhase({kind: 'idle'});
-  };
-
   if (phase.kind === 'done') {
-    const {products, meta} = phase.result;
+    const {savedProducts, renderedPages, failedPages, reused, name} =
+      phase.result;
     return (
-      <View style={styles.flex}>
-        <FlatList
-          data={products}
-          keyExtractor={p => p.id}
-          numColumns={2}
-          columnWrapperStyle={styles.column}
-          contentContainerStyle={styles.grid}
-          ListHeaderComponent={
-            <View style={styles.gridHeader}>
-              <View style={styles.headerText}>
-                <Text style={styles.count}>
-                  {products.length} product{products.length === 1 ? '' : 's'}
-                  {meta
-                    ? ` · ${meta.renderedPages} page${
-                        meta.renderedPages === 1 ? '' : 's'
-                      }`
-                    : ''}
-                </Text>
-                {meta?.failedPages && meta.failedPages.length > 0 ? (
-                  <Text style={styles.warn}>
-                    couldn't read page{meta.failedPages.length === 1 ? '' : 's'}{' '}
-                    {meta.failedPages.join(', ')}
-                  </Text>
-                ) : null}
-              </View>
-              <Text style={styles.link} onPress={reset}>
-                New flyer
-              </Text>
-            </View>
-          }
-          renderItem={({item}) => (
-            <ProductCard
-              product={item}
-              page={pagesByNumber.get(item.page)}
-              width={COLUMN_WIDTH}
-              onPress={setSelected}
-            />
-          )}
-        />
-        <SourcePageModal
-          product={selected}
-          page={selected ? pagesByNumber.get(selected.page) : undefined}
-          onClose={() => setSelected(null)}
-        />
+      <View style={styles.container}>
+        <View style={styles.doneCard}>
+          <Text style={styles.check}>✓</Text>
+          <Text style={styles.doneTitle}>
+            {reused ? 'Already extracted' : 'Saved'}
+          </Text>
+          <Text style={styles.doneBody}>
+            {savedProducts} product{savedProducts === 1 ? '' : 's'} from {name}
+            {'\n'}
+            {renderedPages} page{renderedPages === 1 ? '' : 's'}
+            {failedPages.length > 0
+              ? ` · couldn't read ${failedPages.length}`
+              : ''}
+          </Text>
+          <Text style={styles.hint}>Browse them on the Search tab.</Text>
+        </View>
+        <Pressable
+          onPress={() => setPhase({kind: 'idle'})}
+          style={({pressed}) => [
+            styles.btn,
+            styles.btnGhost,
+            pressed && styles.pressed,
+          ]}>
+          <Text style={styles.btnGhostText}>Upload another</Text>
+        </Pressable>
       </View>
     );
   }
@@ -160,8 +121,8 @@ function UploadScreen(): React.JSX.Element {
     <View style={styles.container}>
       <Text style={styles.title}>Upload</Text>
       <Text style={styles.subtitle}>
-        Add a flyer PDF from your device, then upload it to pull out each
-        product with its price and a crop from the page.
+        Add a flyer PDF from your device. Its products, prices and bounding
+        boxes are extracted and saved — find them on Search.
       </Text>
 
       <View style={styles.fileBox}>
@@ -185,14 +146,14 @@ function UploadScreen(): React.JSX.Element {
 
       <Pressable
         onPress={upload}
-        disabled={!file || phase.kind === 'extracting'}
+        disabled={!file || phase.kind === 'uploading'}
         style={({pressed}) => [
           styles.btn,
           styles.btnPrimary,
-          (!file || phase.kind === 'extracting') && styles.btnDisabled,
+          (!file || phase.kind === 'uploading') && styles.btnDisabled,
           pressed && styles.pressed,
         ]}>
-        {phase.kind === 'extracting' ? (
+        {phase.kind === 'uploading' ? (
           <ActivityIndicator color="#fff" />
         ) : (
           <Text style={styles.btnPrimaryText}>Upload flyer</Text>
@@ -207,7 +168,6 @@ function UploadScreen(): React.JSX.Element {
 }
 
 const styles = StyleSheet.create({
-  flex: {flex: 1},
   container: {
     flex: 1,
     paddingHorizontal: spacing.md,
@@ -248,19 +208,33 @@ const styles = StyleSheet.create({
   btnDisabled: {opacity: 0.5},
   pressed: {opacity: 0.7},
   error: {color: colors.danger, fontSize: 14},
-  grid: {padding: spacing.md, paddingBottom: 96, gap: GAP},
-  column: {gap: GAP},
-  gridHeader: {
-    flexDirection: 'row',
+  doneCard: {
+    backgroundColor: colors.surface,
+    borderRadius: radius.md,
+    borderWidth: 1,
+    borderColor: colors.border,
+    padding: spacing.lg,
     alignItems: 'center',
-    justifyContent: 'space-between',
-    gap: spacing.md,
-    marginBottom: spacing.md,
+    gap: spacing.xs,
   },
-  headerText: {flexShrink: 1, gap: 2},
-  count: {color: colors.textMuted, fontSize: 13},
-  warn: {color: colors.danger, fontSize: 12},
-  link: {color: colors.primary, fontSize: 14, fontWeight: '600'},
+  check: {
+    fontSize: 28,
+    color: colors.primary,
+    fontWeight: '800',
+    marginBottom: spacing.xs,
+  },
+  doneTitle: {fontSize: 18, fontWeight: '700', color: colors.text},
+  doneBody: {
+    fontSize: 14,
+    color: colors.textMuted,
+    textAlign: 'center',
+    lineHeight: 20,
+  },
+  hint: {
+    fontSize: 13,
+    color: colors.primary,
+    marginTop: spacing.sm,
+  },
 });
 
 export default UploadScreen;

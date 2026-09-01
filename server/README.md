@@ -38,34 +38,57 @@ You'll see one `[req] <phone-ip> POST /flyers/extract 200 41000ms` line per
 upload, then the per-page `[gemini] pages N …` breakdown, a `[gemini] TOTAL`,
 and any `truncated` / `FAILED` warnings. `logs/` is gitignored.
 
+## Storage
+
+Extracted products are **saved to SQLite** (`data/flyer.db`, better-sqlite3) and
+rendered page JPEGs to `data/pages/<flyerId>/<page>.jpg`. `data/` is gitignored;
+delete it to start fresh. Re-uploading the exact same PDF (matched by sha256) is
+not re-extracted — it returns the stored summary.
+
 ## API
 
 ### `POST /flyers/extract`
 
 `multipart/form-data`, field **`file`** = the flyer PDF. Optional `?maxpages=N`.
+Extracts, **saves to the DB**, and returns a summary only:
 
 ```jsonc
 {
-  "pages": [
-    { "page": 1, "width": 1224, "height": 1584, "image": "data:image/jpeg;base64,..." }
-  ],
+  "flyerId": "…", "name": "flyer.pdf",
+  "savedProducts": 16, "renderedPages": 1, "totalPages": 1,
+  "failedPages": [], "reused": false
+}
+```
+
+### `GET /products?q=<text>&limit=20&offset=0`
+
+Paginated + text search (matches product name & info) over every stored product,
+newest first.
+
+```jsonc
+{
   "products": [
-    { "id": "1-0", "page": 1, "name": "Corn", "price": "34¢", "priceValue": 0.34,
-      "info": "Each. Product of Canada.", "box": [230, 60, 360, 300] }
+    { "id": "…", "flyerId": "…", "page": 1, "name": "Corn", "price": "34¢",
+      "priceValue": 0.34, "info": "…", "box": [230,60,360,300], "confidence": 95 }
   ],
-  "usage": { "model": "gemini-3.1-flash-lite", "total": { "totalTokens": 2806, "...": "..." } },
-  "meta": { "totalPages": 1, "renderedPages": 1 }
+  "pages": [
+    { "flyerId": "…", "page": 1, "width": 1592, "height": 2060,
+      "image": "http://<host>/pages/<flyerId>/1.jpg" }
+  ],
+  "total": 207, "hasMore": true
 }
 ```
 
 `box` is `[ymin, xmin, ymax, xmax]`, each 0–1000, normalized to that page's
-`width`/`height`. Page images are returned inline as base64 data URIs so the app
-can crop product tiles from them; for very large catalogues switch to serving
-them as files.
+`width`/`height`. `pages` holds the distinct pages referenced by this result set.
+
+### `GET /pages/<flyerId>/<page>.jpg`
+
+The rendered page image (static file).
 
 ### `GET /health`
 
-`{ "ok": true, "gemini": "configured" | "missing" }`
+`{ "ok": true, "gemini": "configured" | "missing", "products": 207 }`
 
 ## Config (`.env`)
 
@@ -74,7 +97,7 @@ them as files.
 | `GEMINI_API_KEY` | — | Required. `MOCK` for canned data. |
 | `GEMINI_MODEL` | `gemini-3.1-flash-lite` | Any vision-capable Gemini model. |
 | `PAGES_PER_REQUEST` | `1` | Pages per Gemini call, clamped 1–4. Above 3 recall drops. |
-| `PORT` | `3001` | Must match the app's `EXPO_PUBLIC_API_BASE_URL`. |
+| `PORT` | `3001` | Must match `LAN_HOST`/`PORT` in the app's `src/config.ts`. |
 
 Per-run token usage is logged to the console and appended to
 `server/logs/gemini-usage.jsonl`.
