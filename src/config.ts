@@ -1,11 +1,13 @@
-import {Platform} from 'react-native';
-
 /**
- * Base URL of the extraction API (see `server/`).
+ * Host + port running the extraction API (see `server/`).
  *
- * - iOS simulator reaches the host's `localhost` directly.
- * - Android emulator maps the host to `10.0.2.2`.
- * - A physical device needs your machine's LAN IP (e.g. http://192.168.0.244:3001).
+ * Set `LAN_HOST` to the dev machine's LAN IP so a physical phone on the same
+ * Wi-Fi can reach the server. Find it on macOS with:  ipconfig getifaddr en0
+ *
+ * - iOS simulator and a physical iPhone both reach the LAN IP fine.
+ * - Android emulator: use "10.0.2.2" instead (its alias for the host loopback).
  */
-export const API_BASE_URL =
-  Platform.OS === 'android' ? 'http://10.0.2.2:3001' : 'http://localhost:3001';
+const LAN_HOST = '192.168.0.244';
+const PORT = 3001;
+
+export const API_BASE_URL = `http://${LAN_HOST}:${PORT}`;

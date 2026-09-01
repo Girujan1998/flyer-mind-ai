@@ -1,8 +1,22 @@
 import './loadEnv.js';
 
+import {networkInterfaces} from 'node:os';
+
 import cors from 'cors';
 import express from 'express';
 import multer from 'multer';
+
+/** First non-internal IPv4 address — the one a phone on the same Wi-Fi uses. */
+function lanAddress() {
+  for (const addrs of Object.values(networkInterfaces())) {
+    for (const a of addrs ?? []) {
+      if (a.family === 'IPv4' && !a.internal) {
+        return a.address;
+      }
+    }
+  }
+  return null;
+}
 
 import {extractFlyer} from './gemini.js';
 import {renderPdf} from './pdf.js';
@@ -96,7 +110,12 @@ app.post('/flyers/extract', upload.single('file'), async (req, res) => {
 });
 
 app.listen(PORT, () => {
+  const lan = lanAddress();
   console.log(`flyer-mind-ai extract API → http://localhost:${PORT}`);
+  if (lan) {
+    console.log(`  on this network (for a phone): http://${lan}:${PORT}`);
+    console.log(`  → set LAN_HOST to "${lan}" in src/config.ts`);
+  }
   if (!process.env.GEMINI_API_KEY) {
     console.warn(
       '  ⚠  GEMINI_API_KEY is not set — copy server/.env.example to server/.env',
