@@ -24,6 +24,10 @@ export type Product = {
   box: GeminiBox | null;
   /** Model's 0-100 self-rated confidence; null if not reported. */
   confidence: number | null;
+  /** Brand-stripped generic type, e.g. "body spray deodorant"; '' if unknown. */
+  category: string;
+  /** Extra lowercase search terms (synonyms, aisle words); [] if none. */
+  tags: string[];
   /** URL of a small pre-cropped thumbnail of this product; null if none. */
   thumb: string | null;
   /** Store this flyer is for, e.g. "Food Basics"; '' if unknown. */

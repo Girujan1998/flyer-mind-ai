@@ -8,7 +8,8 @@
   "scripts": {
     "start": "node src/index.js",
     "dev": "node --watch src/index.js",
-    "logs": "mkdir -p logs && touch logs/server.log && tail -n 100 -f logs/server.log"
+    "logs": "mkdir -p logs && touch logs/server.log && tail -n 100 -f logs/server.log",
+    "backfill:categories": "node scripts/backfill-categories.mjs"
   },
   "dependencies": {
     "better-sqlite3": "^11.6.0",

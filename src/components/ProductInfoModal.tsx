@@ -75,6 +75,9 @@ function ProductInfoModal({
                 <Text style={styles.name}>
                   {product.name || 'Unnamed item'}
                 </Text>
+                {product.category ? (
+                  <Text style={styles.category}>{product.category}</Text>
+                ) : null}
                 {product.price ? (
                   <Text style={styles.price}>{product.price}</Text>
                 ) : null}
@@ -188,6 +191,13 @@ const styles = StyleSheet.create({
     gap: spacing.xs,
   },
   name: {color: colors.text, fontSize: 18, fontWeight: '700', lineHeight: 24},
+  category: {
+    color: colors.textMuted,
+    fontSize: 12,
+    fontWeight: '600',
+    textTransform: 'capitalize',
+    letterSpacing: 0.3,
+  },
   price: {color: colors.primary, fontSize: 22, fontWeight: '800'},
   details: {
     color: colors.textMuted,

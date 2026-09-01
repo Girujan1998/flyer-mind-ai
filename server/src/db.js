@@ -49,21 +49,25 @@ db.exec(`
     info        TEXT,
     box         TEXT,
     confidence  INTEGER,
+    category    TEXT,
+    tags        TEXT,
     has_thumb   INTEGER NOT NULL DEFAULT 0,
     created_at  TEXT NOT NULL
   );
   CREATE INDEX IF NOT EXISTS idx_products_created ON products(created_at DESC);
 `);
 
-// Add the flyer-meta columns to a database created before they existed.
-for (const col of [
-  'store TEXT',
-  'valid_from TEXT',
-  'valid_to TEXT',
-  'meta_confidence INTEGER',
+// Backfill columns onto a database created before they existed.
+for (const [table, col] of [
+  ['flyers', 'store TEXT'],
+  ['flyers', 'valid_from TEXT'],
+  ['flyers', 'valid_to TEXT'],
+  ['flyers', 'meta_confidence INTEGER'],
+  ['products', 'category TEXT'],
+  ['products', 'tags TEXT'],
 ]) {
   try {
-    db.exec(`ALTER TABLE flyers ADD COLUMN ${col}`);
+    db.exec(`ALTER TABLE ${table} ADD COLUMN ${col}`);
   } catch {
     // already there
   }
@@ -83,9 +87,18 @@ const stmts = {
   ),
   insertProduct: db.prepare(
     `INSERT INTO products
-       (id, flyer_id, page, name, price, price_value, info, box, confidence, has_thumb, created_at)
+       (id, flyer_id, page, name, price, price_value, info, box, confidence, category, tags, has_thumb, created_at)
      VALUES
-       (@id, @flyer_id, @page, @name, @price, @price_value, @info, @box, @confidence, @has_thumb, @created_at)`,
+       (@id, @flyer_id, @page, @name, @price, @price_value, @info, @box, @confidence, @category, @tags, @has_thumb, @created_at)`,
+  ),
+  updateCategory: db.prepare(
+    'UPDATE products SET category = @category, tags = @tags WHERE id = @id',
+  ),
+  missingCategory: db.prepare(
+    `SELECT id, name, info FROM products
+      WHERE category IS NULL OR category = ''
+      ORDER BY rowid
+      LIMIT ?`,
   ),
   countProducts: db.prepare('SELECT COUNT(*) AS n FROM products'),
   productsForFlyer: db.prepare(
@@ -156,6 +169,8 @@ export const saveExtraction = db.transaction(
         info: pr.info || null,
         box: pr.box ? JSON.stringify(pr.box) : null,
         confidence: pr.confidence ?? null,
+        category: pr.category || null,
+        tags: pr.tags && pr.tags.length ? JSON.stringify(pr.tags) : null,
         has_thumb: thumb ? 1 : 0,
         created_at: now,
       });
@@ -166,9 +181,36 @@ export const saveExtraction = db.transaction(
   },
 );
 
+/** Products with no generic category yet — for the backfill script. */
+export function productsMissingCategory(limit = 200) {
+  return stmts.missingCategory.all(Math.max(1, Math.min(500, Number(limit) || 200)));
+}
+
+/** Write { id, category, tags: string[] } rows from the categoriser. */
+export const applyCategories = db.transaction(rows => {
+  for (const r of rows) {
+    stmts.updateCategory.run({
+      id: r.id,
+      category: r.category || null,
+      tags: r.tags && r.tags.length ? JSON.stringify(r.tags) : null,
+    });
+  }
+});
+
+function safeJsonArray(s) {
+  try {
+    const v = JSON.parse(s);
+    return Array.isArray(v) ? v : [];
+  } catch {
+    return [];
+  }
+}
+
 function whereFor(q, prefix = '') {
   const name = `${prefix}name`;
   const info = `${prefix}info`;
+  const category = `${prefix}category`;
+  const tags = `${prefix}tags`;
   const words = String(q || '')
     .trim()
     .split(/\s+/)
@@ -178,8 +220,16 @@ function whereFor(q, prefix = '') {
   return {
     clause:
       'WHERE ' +
-      words.map(() => `(${name} LIKE ? OR ${info} LIKE ?)`).join(' AND '),
-    params: words.flatMap(w => [`%${w}%`, `%${w}%`]),
+      words
+        .map(
+          () =>
+            `(${name} LIKE ? OR ${info} LIKE ? OR ${category} LIKE ? OR ${tags} LIKE ?)`,
+        )
+        .join(' AND '),
+    params: words.flatMap(w => {
+      const like = `%${w}%`;
+      return [like, like, like, like];
+    }),
   };
 }
 
@@ -200,7 +250,7 @@ export function searchProducts({q = '', limit = 20, offset = 0}, baseUrl) {
   const rows = db
     .prepare(
       `SELECT p.id, p.flyer_id, p.page, p.name, p.price, p.price_value, p.info,
-              p.box, p.confidence, p.has_thumb,
+              p.box, p.confidence, p.category, p.tags, p.has_thumb,
               f.store, f.valid_from, f.valid_to
          FROM products p
          JOIN flyers f ON f.id = p.flyer_id
@@ -220,6 +270,8 @@ export function searchProducts({q = '', limit = 20, offset = 0}, baseUrl) {
     info: r.info || '',
     box: r.box ? JSON.parse(r.box) : null,
     confidence: r.confidence,
+    category: r.category || '',
+    tags: r.tags ? safeJsonArray(r.tags) : [],
     store: r.store || '',
     validFrom: r.valid_from || '',
     validTo: r.valid_to || '',

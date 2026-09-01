@@ -55,6 +55,23 @@ Sep 2"). It is stored on the `flyers` row (`store`, `valid_from`, `valid_to`,
 - `node scripts/test-flyer-meta.mjs <file.pdf> ...` runs just this call (no DB,
   no product extraction) and prints the result + token usage.
 
+## Generic category + search tags
+
+Every product also gets a brand-stripped **`category`** (1-4 words, e.g.
+`body spray deodorant`, `ice cream`, `cream`) and 2-6 lowercase **`tags`**
+(synonyms / aisle words, e.g. `["deodorant","body spray","antiperspirant"]`).
+Both are matched by `GET /products?q=`, so a shopper who types "ice cream" finds
+"Selection ice milk". They come from the same vision call — no extra request,
+~20 extra output tokens per product.
+
+Products stored before this existed have `category: ""`. Backfill them with a
+text-only pass (names only, no images, batched):
+
+```bash
+npm run backfill:categories            # or: node scripts/backfill-categories.mjs --batch 60
+node scripts/backfill-categories.mjs --dry   # one batch, print, don't write
+```
+
 ## Storage
 
 Extracted products are **saved to SQLite** (`data/flyer.db`, better-sqlite3).
@@ -86,14 +103,15 @@ Extracts, **saves to the DB**, and returns a summary only:
 
 ### `GET /products?q=<text>&limit=20&offset=0`
 
-Paginated + text search (matches product name & info) over every stored product,
-newest first.
+Paginated + text search over every stored product, newest first. Each query word
+must match the product's **name, info, category, or tags**.
 
 ```jsonc
 {
   "products": [
     { "id": "…", "flyerId": "…", "page": 1, "name": "Corn", "price": "34¢",
       "priceValue": 0.34, "info": "…", "box": [230,60,360,300], "confidence": 95,
+      "category": "corn", "tags": ["vegetable","produce","cob"],
       "store": "Food Basics", "validFrom": "2026-08-27", "validTo": "2026-09-02",
       "thumb": "http://<host>/thumbs/<flyerId>/<id>.jpg" }
   ],

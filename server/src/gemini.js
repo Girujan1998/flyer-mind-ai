@@ -68,6 +68,16 @@ For each product:
 - "confidence": integer 0-100, how sure you are that name, price and box are all
   correct for THIS product. Lower it when digits are ambiguous, the tile is small
   or crowded, or text could belong to a neighbour.
+- "category": the product's generic type in 1-4 lowercase words — no brand, no
+  size, no packaging words — the term a shopper would type to find it. Prefer the
+  everyday word over the label's marketing one: "ice milk" -> "ice cream",
+  "soy beverage" -> "plant-based milk", "Athena Club full body dry spray
+  deodorant" -> "body spray deodorant", "Lactantia lactose free cream" ->
+  "cream". English even on a bilingual flyer.
+- "tags": 2-6 lowercase extra search terms a shopper might use for this product —
+  synonyms, the bare noun, the aisle word, a broader and a narrower term, e.g.
+  ["deodorant", "body spray", "antiperspirant"]. No brand names, no sizes, and
+  do not simply repeat "category".
 
 One price shared by two products: if a single price clearly covers TWO OR MORE
 distinct products in the same tile (different product lines — e.g. "Tylenol Extra
@@ -220,10 +230,62 @@ const RESPONSE_SCHEMA = {
       info: {type: 'STRING'},
       box: {type: 'ARRAY', items: {type: 'NUMBER'}},
       confidence: {type: 'INTEGER'},
+      category: {type: 'STRING'},
+      tags: {type: 'ARRAY', items: {type: 'STRING'}},
     },
-    required: ['page', 'name', 'priceValue', 'price', 'info', 'box', 'confidence'],
+    required: [
+      'page',
+      'name',
+      'priceValue',
+      'price',
+      'info',
+      'box',
+      'confidence',
+      'category',
+      'tags',
+    ],
   },
 };
+
+// Generic search terms are all lowercase, punctuation-stripped, ≤4 words.
+function cleanCategory(value) {
+  return (value ?? '')
+    .toString()
+    .toLowerCase()
+    .replace(/[^a-z0-9\s&/-]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .split(' ')
+    .filter(Boolean)
+    .slice(0, 4)
+    .join(' ');
+}
+
+// 2-8 distinct lowercase terms, none equal to the category, each ≤40 chars.
+function cleanTags(value, category) {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  const seen = new Set(category ? [category] : []);
+  const out = [];
+  for (const raw of value) {
+    const t = (raw ?? '')
+      .toString()
+      .toLowerCase()
+      .replace(/[^a-z0-9\s&/-]/g, '')
+      .replace(/\s+/g, ' ')
+      .trim();
+    if (!t || t.length > 40 || seen.has(t)) {
+      continue;
+    }
+    seen.add(t);
+    out.push(t);
+    if (out.length >= 8) {
+      break;
+    }
+  }
+  return out;
+}
 
 // Fix a mangled price string ("2997" -> "$29.97"). priceValue is a number, so it
 // can't lose its decimal — trust it whenever the string looks suspect.
@@ -406,8 +468,9 @@ async function extractBatch(batch, apiKey, model) {
         // eat the whole output budget on a confusing page and truncate the JSON.
         thinkingConfig: {thinkingBudget: 2048},
         // Thinking + the JSON response share this budget. Leave generous room
-        // for a dense page (40+ products) on top of the thinking.
-        maxOutputTokens: Math.min(65536, 10000 * batch.length + 12000),
+        // for a dense page (40+ products, each now also carrying category + tags)
+        // on top of the thinking.
+        maxOutputTokens: Math.min(65536, 12000 * batch.length + 12000),
       },
     },
     apiKey,
@@ -440,6 +503,7 @@ async function extractBatch(batch, apiKey, model) {
     const priceValue =
       typeof p.priceValue === 'number' ? p.priceValue : Number(p.priceValue);
     const confidence = Number(p.confidence);
+    const category = cleanCategory(p.category);
     return {
       page,
       name: (p.name || '').toString().trim(),
@@ -451,6 +515,8 @@ async function extractBatch(batch, apiKey, model) {
       confidence: isFinite(confidence)
         ? Math.max(0, Math.min(100, Math.round(confidence)))
         : null,
+      category,
+      tags: cleanTags(p.tags, category),
     };
   });
 
@@ -482,6 +548,8 @@ export async function extractFlyer(pages) {
           priceValue: 3.99,
           info: 'each',
           confidence: 92,
+          category: 'snack',
+          tags: ['snacks', 'chips'],
         },
         {
           name: 'Mock Product B',
@@ -489,6 +557,8 @@ export async function extractFlyer(pages) {
           priceValue: 1.49,
           info: '500 g',
           confidence: 88,
+          category: 'yogurt',
+          tags: ['dairy', 'greek yogurt'],
         },
         {
           name: 'Mock Product C',
@@ -496,6 +566,8 @@ export async function extractFlyer(pages) {
           priceValue: 8.97,
           info: 'Selected varieties',
           confidence: 41,
+          category: 'laundry detergent',
+          tags: ['detergent', 'soap'],
         },
       ].map((m, j) => ({
         id: `${p.page}-${j}`,
@@ -627,4 +699,93 @@ export async function extractFlyer(pages) {
       failedPages,
     },
   };
+}
+
+// --- Text-only categorisation (backfill) ------------------------------------
+// Give already-extracted products a generic "category" + "tags" without
+// re-rasterising or re-running vision — just the names go up.
+
+const CATEGORY_SCHEMA = {
+  type: 'ARRAY',
+  items: {
+    type: 'OBJECT',
+    properties: {
+      ref: {type: 'INTEGER'},
+      category: {type: 'STRING'},
+      tags: {type: 'ARRAY', items: {type: 'STRING'}},
+    },
+    required: ['ref', 'category', 'tags'],
+  },
+};
+
+const CATEGORY_PROMPT = `You are given a numbered list of retail flyer product names, some with a
+size/detail note in parentheses. For EACH item, return how a shopper would find
+it WITHOUT knowing the brand.
+
+- "ref": the item's number, copied exactly.
+- "category": 1-4 words, lowercase, no brand, no size, no packaging words — the
+  everyday term a shopper types. Prefer the plain word over a marketing one:
+  "ice milk" -> "ice cream", "soy beverage" -> "plant-based milk",
+  "Athena Club full body dry spray deodorant" -> "body spray deodorant",
+  "Lactantia lactose free cream" -> "cream". English only.
+- "tags": 2-6 lowercase alternative search terms — synonyms, the bare noun, the
+  aisle word, a broader and a narrower term, e.g.
+  ["deodorant", "body spray", "antiperspirant"]. No brands, no sizes, and do not
+  just repeat "category".
+
+Return exactly one object per input item, nothing else.`;
+
+/**
+ * @param {Array<{ ref: number, name: string, info?: string }>} items
+ * @returns {Promise<{ result: Map<number, { category: string, tags: string[] }>, usage: object }>}
+ */
+export async function categorizeProducts(items) {
+  if (process.env.GEMINI_API_KEY === 'MOCK') {
+    return {
+      result: new Map(
+        items.map(it => [it.ref, {category: 'mock category', tags: ['mock']}]),
+      ),
+      usage: {mock: true},
+    };
+  }
+
+  const {apiKey, model} = config();
+  const lines = items
+    .map(it => `${it.ref}. ${it.name}${it.info ? ` (${it.info})` : ''}`)
+    .join('\n');
+
+  const json = await callGemini(
+    {
+      contents: [{parts: [{text: CATEGORY_PROMPT}, {text: lines}]}],
+      generationConfig: {
+        temperature: 0,
+        responseMimeType: 'application/json',
+        responseSchema: CATEGORY_SCHEMA,
+        thinkingConfig: {thinkingBudget: 0},
+        maxOutputTokens: Math.min(65536, 140 * items.length + 2000),
+      },
+    },
+    apiKey,
+    model,
+  );
+
+  const text = json.candidates?.[0]?.content?.parts?.[0]?.text;
+  const result = new Map();
+  try {
+    const arr = JSON.parse(text);
+    if (Array.isArray(arr)) {
+      for (const r of arr) {
+        const ref = Number(r.ref);
+        if (!Number.isInteger(ref)) {
+          continue;
+        }
+        const category = cleanCategory(r.category);
+        result.set(ref, {category, tags: cleanTags(r.tags, category)});
+      }
+    }
+  } catch {
+    // caller keeps whatever it already has
+  }
+
+  return {result, usage: readUsage(json)};
 }
