@@ -11,6 +11,7 @@ import multer from 'multer';
 import {
   PAGES_DIR,
   THUMBS_DIR,
+  departmentCounts,
   findFlyerByHash,
   productCountForFlyer,
   saveExtraction,
@@ -205,12 +206,27 @@ app.post('/flyers/extract', upload.single('file'), async (req, res) => {
 app.get('/products', (req, res) => {
   try {
     const result = searchProducts(
-      {q: req.query.q, limit: req.query.limit, offset: req.query.offset},
+      {
+        q: req.query.q,
+        department: req.query.department,
+        limit: req.query.limit,
+        offset: req.query.offset,
+      },
       baseUrlOf(req),
     );
     res.json(result);
   } catch (err) {
     console.error('[products] failed:', err);
+    res.status(500).json({error: err?.message || 'Query failed'});
+  }
+});
+
+/** GET /departments -> { departments: [{ department, count }] } busiest first. */
+app.get('/departments', (_req, res) => {
+  try {
+    res.json({departments: departmentCounts()});
+  } catch (err) {
+    console.error('[departments] failed:', err);
     res.status(500).json({error: err?.message || 'Query failed'});
   }
 });

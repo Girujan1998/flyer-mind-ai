@@ -6,6 +6,8 @@ import {appendFile, mkdir} from 'node:fs/promises';
 import {dirname, join} from 'node:path';
 import {fileURLToPath} from 'node:url';
 
+import {DEPARTMENTS, cleanDepartment} from './departments.js';
+
 const API_BASE = 'https://generativelanguage.googleapis.com/v1beta/models';
 const LOG_FILE = join(
   dirname(fileURLToPath(import.meta.url)),
@@ -78,6 +80,16 @@ For each product:
   synonyms, the bare noun, the aisle word, a broader and a narrower term, e.g.
   ["deodorant", "body spray", "antiperspirant"]. No brand names, no sizes, and
   do not simply repeat "category".
+- "department": exactly ONE store aisle from this list, lowercase, copied
+  verbatim: ${DEPARTMENTS.join(', ')}. Pick the aisle a shopper physically walks
+  to. Fresh whole fruit -> "fruit"; fresh whole vegetables -> "vegetables";
+  anything frozen -> "frozen"; milk/cheese/yogurt/butter/eggs (incl. chocolate
+  milk) -> "dairy & eggs"; soda/juice/water/coffee -> "beverages";
+  chips/candy/cookies -> "snacks & candy"; laundry detergent/fabric softener/
+  stain remover -> "laundry"; dish soap/cleaners/trash bags -> "household &
+  cleaning"; paper towels/toilet paper/napkins -> "paper goods";
+  shampoo/deodorant/makeup -> "beauty & personal care"; vitamins/medicine/first
+  aid -> "health & wellness". Use "other" only when nothing else fits.
 
 One price shared by two products: if a single price clearly covers TWO OR MORE
 distinct products in the same tile (different product lines — e.g. "Tylenol Extra
@@ -232,6 +244,7 @@ const RESPONSE_SCHEMA = {
       confidence: {type: 'INTEGER'},
       category: {type: 'STRING'},
       tags: {type: 'ARRAY', items: {type: 'STRING'}},
+      department: {type: 'STRING', enum: DEPARTMENTS},
     },
     required: [
       'page',
@@ -243,6 +256,7 @@ const RESPONSE_SCHEMA = {
       'confidence',
       'category',
       'tags',
+      'department',
     ],
   },
 };
@@ -517,6 +531,7 @@ async function extractBatch(batch, apiKey, model) {
         : null,
       category,
       tags: cleanTags(p.tags, category),
+      department: cleanDepartment(p.department),
     };
   });
 
@@ -550,6 +565,7 @@ export async function extractFlyer(pages) {
           confidence: 92,
           category: 'snack',
           tags: ['snacks', 'chips'],
+          department: 'snacks & candy',
         },
         {
           name: 'Mock Product B',
@@ -559,6 +575,7 @@ export async function extractFlyer(pages) {
           confidence: 88,
           category: 'yogurt',
           tags: ['dairy', 'greek yogurt'],
+          department: 'dairy & eggs',
         },
         {
           name: 'Mock Product C',
@@ -568,6 +585,7 @@ export async function extractFlyer(pages) {
           confidence: 41,
           category: 'laundry detergent',
           tags: ['detergent', 'soap'],
+          department: 'laundry',
         },
       ].map((m, j) => ({
         id: `${p.page}-${j}`,
@@ -830,4 +848,83 @@ function parseObjectArray(text) {
     }
   }
   return out;
+}
+
+// --- Department assignment (backfill) ---------------------------------------
+// Coarser than category. Given a list of generic categories (or names), assign
+// each to one fixed store aisle. Cheap: run it over the DISTINCT categories, not
+// every product.
+
+const DEPARTMENT_SCHEMA = {
+  type: 'ARRAY',
+  items: {
+    type: 'OBJECT',
+    properties: {
+      ref: {type: 'INTEGER'},
+      department: {type: 'STRING', enum: DEPARTMENTS},
+    },
+    required: ['ref', 'department'],
+  },
+};
+
+const DEPARTMENT_PROMPT = `You are given a numbered list of generic grocery / retail product types. Assign
+EACH to exactly ONE store department from this list, lowercase, copied verbatim:
+${DEPARTMENTS.join(', ')}.
+
+- "ref": the item's number, copied exactly.
+- "department": one value from the list. Pick the aisle a shopper physically
+  walks to. Fresh whole fruit -> "fruit"; fresh whole vegetables ->
+  "vegetables"; anything frozen -> "frozen"; milk/cheese/yogurt/butter/eggs
+  (incl. chocolate milk) -> "dairy & eggs"; soda/juice/water/coffee ->
+  "beverages"; chips/candy/cookies -> "snacks & candy"; laundry detergent/
+  fabric softener/stain remover -> "laundry"; dish soap/cleaners/trash bags ->
+  "household & cleaning"; paper towels/toilet paper/napkins -> "paper goods";
+  shampoo/deodorant/makeup -> "beauty & personal care"; vitamins/medicine/first
+  aid -> "health & wellness". Use "other" only when nothing else fits.
+
+Return exactly one object per input item.`;
+
+/**
+ * @param {Array<{ ref: number, text: string }>} items  ref + the category or name
+ * @returns {Promise<{ result: Map<number, string>, usage: object, finishReason?: string }>}
+ */
+export async function assignDepartments(items) {
+  if (process.env.GEMINI_API_KEY === 'MOCK') {
+    return {
+      result: new Map(items.map(it => [it.ref, 'other'])),
+      usage: {mock: true},
+    };
+  }
+
+  const {apiKey, model} = config();
+  const lines = items.map(it => `${it.ref}. ${it.text}`).join('\n');
+
+  const json = await callGemini(
+    {
+      contents: [{parts: [{text: DEPARTMENT_PROMPT}, {text: lines}]}],
+      generationConfig: {
+        temperature: 0,
+        responseMimeType: 'application/json',
+        responseSchema: DEPARTMENT_SCHEMA,
+        thinkingConfig: {thinkingBudget: 256},
+        maxOutputTokens: Math.min(65536, 40 * items.length + 4000),
+      },
+    },
+    apiKey,
+    model,
+  );
+
+  const candidate = json.candidates?.[0];
+  const text = candidate?.content?.parts?.[0]?.text ?? '';
+  const finishReason = candidate?.finishReason;
+
+  const result = new Map();
+  for (const r of parseObjectArray(text)) {
+    const ref = Number(r.ref);
+    if (Number.isInteger(ref)) {
+      result.set(ref, cleanDepartment(r.department));
+    }
+  }
+
+  return {result, usage: readUsage(json), finishReason};
 }

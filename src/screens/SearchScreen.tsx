@@ -4,6 +4,7 @@ import {
   Dimensions,
   FlatList,
   Pressable,
+  ScrollView,
   StyleSheet,
   Text,
   TextInput,
@@ -11,9 +12,11 @@ import {
 } from 'react-native';
 
 import {
+  DepartmentCount,
   FlyerPage,
   NoServerError,
   Product,
+  fetchDepartments,
   pageKey,
   searchProducts,
 } from '../api/extract';
@@ -27,9 +30,15 @@ const GAP = spacing.sm;
 const COLUMN_WIDTH =
   (Dimensions.get('window').width - spacing.md * 2 - GAP) / 2;
 
+function titleCase(s: string): string {
+  return s.replace(/\b\w/g, c => c.toUpperCase());
+}
+
 function SearchScreen(): React.JSX.Element {
   const [query, setQuery] = useState('');
   const [debounced, setDebounced] = useState('');
+  const [department, setDepartment] = useState('');
+  const [departments, setDepartments] = useState<DepartmentCount[]>([]);
 
   const [products, setProducts] = useState<Product[]>([]);
   const [pages, setPages] = useState<Map<string, FlyerPage>>(new Map());
@@ -50,6 +59,13 @@ function SearchScreen(): React.JSX.Element {
     return () => clearTimeout(id);
   }, [query]);
 
+  // the aisle filter chips — load once, refresh when the catalog might have grown
+  useEffect(() => {
+    fetchDepartments()
+      .then(res => setDepartments(res.departments))
+      .catch(() => setDepartments([]));
+  }, []);
+
   const mergePages = (list: FlyerPage[]) =>
     setPages(prev => {
       const next = new Map(prev);
@@ -68,6 +84,7 @@ function SearchScreen(): React.JSX.Element {
     try {
       const res = await searchProducts({
         q: debounced,
+        department,
         limit: PAGE_SIZE,
         offset: 0,
       });
@@ -94,7 +111,7 @@ function SearchScreen(): React.JSX.Element {
         setLoading(false);
       }
     }
-  }, [debounced]);
+  }, [debounced, department]);
 
   useEffect(() => {
     load();
@@ -108,6 +125,7 @@ function SearchScreen(): React.JSX.Element {
     try {
       const res = await searchProducts({
         q: debounced,
+        department,
         limit: PAGE_SIZE,
         offset: products.length,
       });
@@ -163,6 +181,33 @@ function SearchScreen(): React.JSX.Element {
         />
       </View>
 
+      {departments.length > 0 ? (
+        <ScrollView
+          horizontal
+          showsHorizontalScrollIndicator={false}
+          contentContainerStyle={styles.chips}
+          keyboardShouldPersistTaps="handled">
+          <Chip
+            label="All"
+            active={department === ''}
+            onPress={() => setDepartment('')}
+          />
+          {departments.map(d => (
+            <Chip
+              key={d.department}
+              label={titleCase(d.department)}
+              count={d.count}
+              active={department === d.department}
+              onPress={() =>
+                setDepartment(prev =>
+                  prev === d.department ? '' : d.department,
+                )
+              }
+            />
+          ))}
+        </ScrollView>
+      ) : null}
+
       {loading ? (
         <View style={styles.center}>
           <ActivityIndicator color={colors.textMuted} />
@@ -178,7 +223,11 @@ function SearchScreen(): React.JSX.Element {
         <View style={styles.center}>
           <Text style={styles.empty}>
             {debounced
-              ? `No products match "${debounced}".`
+              ? `No products match "${debounced}"${
+                  department ? ` in ${titleCase(department)}` : ''
+                }.`
+              : department
+              ? `Nothing in ${titleCase(department)} yet.`
               : 'No products yet — upload a flyer.'}
           </Text>
         </View>
@@ -229,6 +278,35 @@ function SearchScreen(): React.JSX.Element {
   );
 }
 
+function Chip({
+  label,
+  count,
+  active,
+  onPress,
+}: {
+  label: string;
+  count?: number;
+  active: boolean;
+  onPress: () => void;
+}): React.JSX.Element {
+  return (
+    <Pressable
+      onPress={onPress}
+      accessibilityRole="button"
+      accessibilityState={{selected: active}}
+      style={({pressed}) => [
+        styles.chip,
+        active && styles.chipActive,
+        pressed && styles.pressed,
+      ]}>
+      <Text style={[styles.chipText, active && styles.chipTextActive]}>
+        {label}
+        {count != null ? ` ${count}` : ''}
+      </Text>
+    </Pressable>
+  );
+}
+
 const styles = StyleSheet.create({
   container: {flex: 1},
   searchWrap: {
@@ -256,6 +334,25 @@ const styles = StyleSheet.create({
   error: {color: colors.danger, fontSize: 14, textAlign: 'center'},
   retry: {marginTop: spacing.md, padding: spacing.sm},
   retryText: {color: colors.primary, fontSize: 14, fontWeight: '600'},
+  chips: {
+    paddingHorizontal: spacing.md,
+    paddingBottom: spacing.sm,
+    gap: spacing.xs + 2,
+  },
+  chip: {
+    paddingVertical: 6,
+    paddingHorizontal: spacing.sm + 4,
+    borderRadius: 999,
+    borderWidth: 1,
+    borderColor: colors.border,
+    backgroundColor: colors.surface,
+  },
+  chipActive: {
+    backgroundColor: colors.primaryTint,
+    borderColor: colors.primary,
+  },
+  chipText: {fontSize: 12, fontWeight: '600', color: colors.textMuted},
+  chipTextActive: {color: colors.primary},
   grid: {padding: spacing.md, paddingBottom: 96, gap: GAP},
   column: {gap: GAP},
   footer: {paddingVertical: spacing.lg, alignItems: 'center'},

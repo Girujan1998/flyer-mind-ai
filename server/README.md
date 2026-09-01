@@ -55,21 +55,30 @@ Sep 2"). It is stored on the `flyers` row (`store`, `valid_from`, `valid_to`,
 - `node scripts/test-flyer-meta.mjs <file.pdf> ...` runs just this call (no DB,
   no product extraction) and prints the result + token usage.
 
-## Generic category + search tags
+## Category, tags, department
 
-Every product also gets a brand-stripped **`category`** (1-4 words, e.g.
-`body spray deodorant`, `ice cream`, `cream`) and 2-6 lowercase **`tags`**
-(synonyms / aisle words, e.g. `["deodorant","body spray","antiperspirant"]`).
-Both are matched by `GET /products?q=`, so a shopper who types "ice cream" finds
-"Selection ice milk". They come from the same vision call — no extra request,
-~20 extra output tokens per product.
+Three levels of grouping on every product, all from the same vision call (no
+extra request, ~25 extra output tokens each):
 
-Products stored before this existed have `category: ""`. Backfill them with a
-text-only pass (names only, no images, batched):
+- **`category`** — brand/size-stripped type, 1-4 words: `body spray deodorant`,
+  `ice cream`, `cream`.
+- **`tags`** — 2-6 lowercase synonyms / aisle words:
+  `["deodorant","body spray","antiperspirant"]`.
+- **`department`** — one fixed store aisle (`fruit`, `vegetables`, `laundry`,
+  `dairy & eggs`, `electronics`, …; full list in `src/departments.js`).
+
+`category` and `tags` are matched by `GET /products?q=` (so "ice cream" finds
+"Selection ice milk"); `department` is a filter — `GET /products?department=laundry`
+— and `GET /departments` returns `{ departments: [{ department, count }] }` for
+the app's filter chips.
+
+Products stored before a field existed have it blank. Backfill with text-only
+passes (names only, no images, batched — run categories first):
 
 ```bash
-npm run backfill:categories            # or: node scripts/backfill-categories.mjs --batch 60
-node scripts/backfill-categories.mjs --dry   # one batch, print, don't write
+npm run backfill:categories                    # name -> category + tags
+npm run backfill:departments                    # category -> department (cheap: per distinct category)
+node scripts/backfill-categories.mjs --dry      # one batch, print, don't write
 ```
 
 ## Storage
@@ -101,10 +110,11 @@ Extracts, **saves to the DB**, and returns a summary only:
 }
 ```
 
-### `GET /products?q=<text>&limit=20&offset=0`
+### `GET /products?q=<text>&department=<aisle>&limit=20&offset=0`
 
-Paginated + text search over every stored product, newest first. Each query word
-must match the product's **name, info, category, or tags**.
+Paginated search over every stored product, newest first. Each query word must
+match the product's **name, info, category, or tags**; `department`, if given,
+filters to that one aisle (ignored if not a known department).
 
 ```jsonc
 {
@@ -112,6 +122,7 @@ must match the product's **name, info, category, or tags**.
     { "id": "…", "flyerId": "…", "page": 1, "name": "Corn", "price": "34¢",
       "priceValue": 0.34, "info": "…", "box": [230,60,360,300], "confidence": 95,
       "category": "corn", "tags": ["vegetable","produce","cob"],
+      "department": "vegetables",
       "store": "Food Basics", "validFrom": "2026-08-27", "validTo": "2026-09-02",
       "thumb": "http://<host>/thumbs/<flyerId>/<id>.jpg" }
   ],
@@ -126,6 +137,11 @@ must match the product's **name, info, category, or tags**.
 `box` is `[ymin, xmin, ymax, xmax]`, each 0–1000, normalized to that page's
 `width`/`height`. `thumb` is the product's crop (or `null`); `pages` holds the
 distinct full pages referenced by this result set (for the source-page view).
+
+### `GET /departments`
+
+`{ "departments": [{ "department": "pantry", "count": 80 }, …] }` — every aisle
+that has products, busiest first. Powers the app's filter chips.
 
 ### `GET /pages/<flyerId>/<page>.jpg` · `GET /thumbs/<flyerId>/<id>.jpg`
 

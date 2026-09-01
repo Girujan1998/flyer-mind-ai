@@ -28,6 +28,8 @@ export type Product = {
   category: string;
   /** Extra lowercase search terms (synonyms, aisle words); [] if none. */
   tags: string[];
+  /** Coarse store aisle, e.g. "laundry", "fruit"; '' if unknown. */
+  department: string;
   /** URL of a small pre-cropped thumbnail of this product; null if none. */
   thumb: string | null;
   /** Store this flyer is for, e.g. "Food Basics"; '' if unknown. */
@@ -112,6 +114,7 @@ export type SearchResult = {
 /** Paginated + text search over every stored product, newest first. */
 export function searchProducts(params: {
   q?: string;
+  department?: string;
   limit?: number;
   offset?: number;
 }): Promise<SearchResult> {
@@ -120,10 +123,20 @@ export function searchProducts(params: {
     `limit=${params.limit ?? 20}`,
     `offset=${params.offset ?? 0}`,
     params.q ? `q=${encodeURIComponent(params.q)}` : '',
+    params.department
+      ? `department=${encodeURIComponent(params.department)}`
+      : '',
   ]
     .filter(Boolean)
     .join('&');
   return api<SearchResult>(`/products?${qs}`);
+}
+
+export type DepartmentCount = {department: string; count: number};
+
+/** The store aisles that actually have products, busiest first. */
+export function fetchDepartments(): Promise<{departments: DepartmentCount[]}> {
+  return api<{departments: DepartmentCount[]}>('/departments');
 }
 
 const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;

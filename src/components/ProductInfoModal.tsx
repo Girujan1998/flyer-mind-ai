@@ -96,6 +96,14 @@ function ProductInfoModal({
                       <Text style={styles.metaValue}>{product.store}</Text>
                     </View>
                   ) : null}
+                  {product.department ? (
+                    <View style={styles.metaCell}>
+                      <Text style={styles.metaKey}>Aisle</Text>
+                      <Text style={[styles.metaValue, styles.metaCapitalize]}>
+                        {product.department}
+                      </Text>
+                    </View>
+                  ) : null}
                   {validity ? (
                     <View style={styles.metaCellFull}>
                       <Text style={styles.metaKey}>Flyer valid</Text>
@@ -224,6 +232,7 @@ const styles = StyleSheet.create({
     textTransform: 'uppercase',
   },
   metaValue: {color: colors.text, fontSize: 14, fontWeight: '600'},
+  metaCapitalize: {textTransform: 'capitalize'},
   cta: {
     marginTop: spacing.lg,
     minHeight: 48,

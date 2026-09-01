@@ -9,6 +9,8 @@ import {fileURLToPath} from 'node:url';
 
 import Database from 'better-sqlite3';
 
+import {isDepartment} from './departments.js';
+
 const DATA_DIR = join(dirname(fileURLToPath(import.meta.url)), '..', 'data');
 export const PAGES_DIR = join(DATA_DIR, 'pages');
 export const THUMBS_DIR = join(DATA_DIR, 'thumbs');
@@ -51,10 +53,12 @@ db.exec(`
     confidence  INTEGER,
     category    TEXT,
     tags        TEXT,
+    department  TEXT,
     has_thumb   INTEGER NOT NULL DEFAULT 0,
     created_at  TEXT NOT NULL
   );
   CREATE INDEX IF NOT EXISTS idx_products_created ON products(created_at DESC);
+  CREATE INDEX IF NOT EXISTS idx_products_department ON products(department);
 `);
 
 // Backfill columns onto a database created before they existed.
@@ -65,6 +69,7 @@ for (const [table, col] of [
   ['flyers', 'meta_confidence INTEGER'],
   ['products', 'category TEXT'],
   ['products', 'tags TEXT'],
+  ['products', 'department TEXT'],
 ]) {
   try {
     db.exec(`ALTER TABLE ${table} ADD COLUMN ${col}`);
@@ -87,9 +92,9 @@ const stmts = {
   ),
   insertProduct: db.prepare(
     `INSERT INTO products
-       (id, flyer_id, page, name, price, price_value, info, box, confidence, category, tags, has_thumb, created_at)
+       (id, flyer_id, page, name, price, price_value, info, box, confidence, category, tags, department, has_thumb, created_at)
      VALUES
-       (@id, @flyer_id, @page, @name, @price, @price_value, @info, @box, @confidence, @category, @tags, @has_thumb, @created_at)`,
+       (@id, @flyer_id, @page, @name, @price, @price_value, @info, @box, @confidence, @category, @tags, @department, @has_thumb, @created_at)`,
   ),
   updateCategory: db.prepare(
     'UPDATE products SET category = @category, tags = @tags WHERE id = @id',
@@ -99,6 +104,33 @@ const stmts = {
       WHERE category IS NULL OR category = ''
       ORDER BY rowid
       LIMIT ?`,
+  ),
+  updateDepartmentById: db.prepare(
+    'UPDATE products SET department = @department WHERE id = @id',
+  ),
+  updateDepartmentByCategory: db.prepare(
+    `UPDATE products SET department = @department
+      WHERE category = @category AND (department IS NULL OR department = '')`,
+  ),
+  distinctCategoriesMissingDept: db.prepare(
+    `SELECT category, COUNT(*) AS n FROM products
+      WHERE category IS NOT NULL AND category <> ''
+        AND (department IS NULL OR department = '')
+      GROUP BY category
+      ORDER BY n DESC
+      LIMIT ?`,
+  ),
+  productsMissingDept: db.prepare(
+    `SELECT id, name FROM products
+      WHERE department IS NULL OR department = ''
+      ORDER BY rowid
+      LIMIT ?`,
+  ),
+  departmentCounts: db.prepare(
+    `SELECT department, COUNT(*) AS n FROM products
+      WHERE department IS NOT NULL AND department <> ''
+      GROUP BY department
+      ORDER BY n DESC`,
   ),
   countProducts: db.prepare('SELECT COUNT(*) AS n FROM products'),
   productsForFlyer: db.prepare(
@@ -171,6 +203,7 @@ export const saveExtraction = db.transaction(
         confidence: pr.confidence ?? null,
         category: pr.category || null,
         tags: pr.tags && pr.tags.length ? JSON.stringify(pr.tags) : null,
+        department: pr.department || null,
         has_thumb: thumb ? 1 : 0,
         created_at: now,
       });
@@ -197,6 +230,49 @@ export const applyCategories = db.transaction(rows => {
   }
 });
 
+/** Distinct categories whose products still have no department. */
+export function distinctCategoriesMissingDepartment(limit = 400) {
+  return stmts.distinctCategoriesMissingDept.all(
+    Math.max(1, Math.min(1000, Number(limit) || 400)),
+  );
+}
+
+/** Products with no category to lean on — department assigned from name. */
+export function productsMissingDepartment(limit = 60) {
+  return stmts.productsMissingDept.all(
+    Math.max(1, Math.min(500, Number(limit) || 60)),
+  );
+}
+
+/** Bulk-set department for every product sharing each { category, department }. */
+export const applyDepartmentsByCategory = db.transaction(rows => {
+  for (const r of rows) {
+    if (r.department) {
+      stmts.updateDepartmentByCategory.run({
+        category: r.category,
+        department: r.department,
+      });
+    }
+  }
+});
+
+/** Set department on individual { id, department } rows. */
+export const applyDepartmentsById = db.transaction(rows => {
+  for (const r of rows) {
+    if (r.department) {
+      stmts.updateDepartmentById.run({id: r.id, department: r.department});
+    }
+  }
+});
+
+/** [{ department, count }] over every product that has one, busiest first. */
+export function departmentCounts() {
+  return stmts.departmentCounts.all().map(r => ({
+    department: r.department,
+    count: r.n,
+  }));
+}
+
 function safeJsonArray(s) {
   try {
     const v = JSON.parse(s);
@@ -206,51 +282,63 @@ function safeJsonArray(s) {
   }
 }
 
-function whereFor(q, prefix = '') {
-  const name = `${prefix}name`;
-  const info = `${prefix}info`;
-  const category = `${prefix}category`;
-  const tags = `${prefix}tags`;
+function buildWhere(q, department, prefix = '') {
+  const col = c => `${prefix}${c}`;
+  const conds = [];
+  const params = [];
+
   const words = String(q || '')
     .trim()
     .split(/\s+/)
     .filter(Boolean)
     .slice(0, 6);
-  if (!words.length) return {clause: '', params: []};
+  for (const w of words) {
+    conds.push(
+      `(${col('name')} LIKE ? OR ${col('info')} LIKE ? OR ${col(
+        'category',
+      )} LIKE ? OR ${col('tags')} LIKE ?)`,
+    );
+    const like = `%${w}%`;
+    params.push(like, like, like, like);
+  }
+
+  const dep = String(department || '')
+    .trim()
+    .toLowerCase();
+  if (dep && isDepartment(dep)) {
+    conds.push(`${col('department')} = ?`);
+    params.push(dep);
+  }
+
   return {
-    clause:
-      'WHERE ' +
-      words
-        .map(
-          () =>
-            `(${name} LIKE ? OR ${info} LIKE ? OR ${category} LIKE ? OR ${tags} LIKE ?)`,
-        )
-        .join(' AND '),
-    params: words.flatMap(w => {
-      const like = `%${w}%`;
-      return [like, like, like, like];
-    }),
+    clause: conds.length ? `WHERE ${conds.join(' AND ')}` : '',
+    params,
   };
 }
 
 /**
  * Paginated + text search over all stored products, newest first.
+ * `q` matches name/info/category/tags; `department` filters to one aisle.
  * `baseUrl` is `http://<host>` — used to build page + thumbnail URLs.
  * Returns { products, pages, total, hasMore }.
  */
-export function searchProducts({q = '', limit = 20, offset = 0}, baseUrl) {
+export function searchProducts(
+  {q = '', department = '', limit = 20, offset = 0},
+  baseUrl,
+) {
   const lim = Math.max(1, Math.min(100, Number(limit) || 20));
   const off = Math.max(0, Number(offset) || 0);
-  const flat = whereFor(q);
+
+  const flat = buildWhere(q, department);
   const total = db
     .prepare(`SELECT COUNT(*) AS n FROM products ${flat.clause}`)
     .get(...flat.params).n;
 
-  const {clause, params} = whereFor(q, 'p.');
+  const {clause, params} = buildWhere(q, department, 'p.');
   const rows = db
     .prepare(
       `SELECT p.id, p.flyer_id, p.page, p.name, p.price, p.price_value, p.info,
-              p.box, p.confidence, p.category, p.tags, p.has_thumb,
+              p.box, p.confidence, p.category, p.tags, p.department, p.has_thumb,
               f.store, f.valid_from, f.valid_to
          FROM products p
          JOIN flyers f ON f.id = p.flyer_id
@@ -272,6 +360,7 @@ export function searchProducts({q = '', limit = 20, offset = 0}, baseUrl) {
     confidence: r.confidence,
     category: r.category || '',
     tags: r.tags ? safeJsonArray(r.tags) : [],
+    department: r.department || '',
     store: r.store || '',
     validFrom: r.valid_from || '',
     validTo: r.valid_to || '',
