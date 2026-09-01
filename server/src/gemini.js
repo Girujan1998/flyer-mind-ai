@@ -187,6 +187,64 @@ function readUsage(json) {
   };
 }
 
+// Parse Gemini's JSON array of products. If the response was truncated (a dense
+// page can still overrun the output budget), salvage every complete object
+// rather than failing the whole page with "Unexpected end of JSON input".
+function parseProductArray(text, pageLabel, finishReason) {
+  try {
+    const v = JSON.parse(text);
+    if (Array.isArray(v)) return v;
+  } catch {
+    // fall through to salvage
+  }
+
+  const salvaged = [];
+  let depth = 0;
+  let inStr = false;
+  let esc = false;
+  let objStart = -1;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (inStr) {
+      if (esc) esc = false;
+      else if (c === '\\') esc = true;
+      else if (c === '"') inStr = false;
+      continue;
+    }
+    if (c === '"') inStr = true;
+    else if (c === '{') {
+      if (depth === 0) objStart = i;
+      depth++;
+    } else if (c === '}') {
+      depth--;
+      if (depth === 0 && objStart >= 0) {
+        try {
+          salvaged.push(JSON.parse(text.slice(objStart, i + 1)));
+        } catch {
+          /* skip a malformed object */
+        }
+        objStart = -1;
+      }
+    }
+  }
+
+  if (salvaged.length) {
+    console.warn(
+      `[gemini] pages ${pageLabel}: response truncated` +
+        (finishReason ? ` (finishReason ${finishReason})` : '') +
+        ` — salvaged ${salvaged.length} complete product(s)`,
+    );
+    return salvaged;
+  }
+
+  throw new Error(
+    `Gemini response for pages ${pageLabel} could not be parsed` +
+      (finishReason === 'MAX_TOKENS'
+        ? ' — it was cut off by the output limit. Try PAGES_PER_REQUEST=1 or a lower MAX_DIMENSION.'
+        : `: ${text.slice(0, 300)}`),
+  );
+}
+
 // batch: [{ page, jpeg }]
 async function extractBatch(batch, apiKey, model) {
   const pageNums = batch.map(p => p.page);
@@ -204,10 +262,13 @@ async function extractBatch(batch, apiKey, model) {
         temperature: 0,
         responseMimeType: 'application/json',
         responseSchema: RESPONSE_SCHEMA,
-        // Dynamic thinking — let the model reason about ambiguous digits and
-        // which tile a piece of text belongs to, instead of snap-guessing.
-        thinkingConfig: {thinkingBudget: -1},
-        maxOutputTokens: Math.min(65536, 6000 * batch.length + 8000),
+        // A bounded thinking budget — enough to reason about ambiguous digits
+        // and which tile a piece of text belongs to, but capped so it can't
+        // eat the whole output budget on a confusing page and truncate the JSON.
+        thinkingConfig: {thinkingBudget: 2048},
+        // Thinking + the JSON response share this budget. Leave generous room
+        // for a dense page (40+ products) on top of the thinking.
+        maxOutputTokens: Math.min(65536, 10000 * batch.length + 12000),
       },
     },
     apiKey,
@@ -216,12 +277,13 @@ async function extractBatch(batch, apiKey, model) {
 
   const candidate = json.candidates?.[0];
   const text = candidate?.content?.parts?.[0]?.text;
+  const finishReason = candidate?.finishReason;
   if (!text) {
-    if (candidate?.finishReason === 'MAX_TOKENS') {
+    if (finishReason === 'MAX_TOKENS') {
       throw new Error(
         `Gemini response for pages ${pageNums.join(
           ', ',
-        )} was cut off by the output limit — lower PAGES_PER_REQUEST or raise maxOutputTokens in server/src/gemini.js`,
+        )} was cut off by the output limit before any product — try PAGES_PER_REQUEST=1 or a lower MAX_DIMENSION.`,
       );
     }
     throw new Error(
@@ -229,7 +291,7 @@ async function extractBatch(batch, apiKey, model) {
     );
   }
 
-  const items = JSON.parse(text);
+  const items = parseProductArray(text, pageNums.join(', '), finishReason);
   const fallbackPage = pageNums[0];
   const products = items.map(p => {
     let page = parseInt(p.page, 10);
@@ -311,6 +373,7 @@ export async function extractFlyer(pages) {
 
   const results = new Array(batches.length);
   const requests = new Array(batches.length);
+  const failedPages = [];
   let next = 0;
 
   async function worker() {
@@ -322,7 +385,18 @@ export async function extractFlyer(pages) {
       const batch = batches[i];
       const label = batch.map(p => p.page).join(',');
       const started = Date.now();
-      const {products, usage} = await extractBatch(batch, apiKey, model);
+
+      let products;
+      let usage;
+      try {
+        ({products, usage} = await extractBatch(batch, apiKey, model));
+      } catch (err) {
+        // One bad page shouldn't lose the whole flyer — record it and move on.
+        failedPages.push(...batch.map(p => p.page));
+        results[i] = [];
+        console.warn(`[gemini] pages ${label} FAILED: ${err.message}`);
+        continue;
+      }
       const ms = Date.now() - started;
 
       requests[i] = {
@@ -354,7 +428,17 @@ export async function extractFlyer(pages) {
 
   const flat = results.flat().map((p, i) => ({id: `${p.page}-${i}`, ...p}));
 
-  const total = requests.reduce(
+  if (!flat.length && failedPages.length) {
+    throw new Error(
+      `Extraction failed for every page (${failedPages.length}). See server logs.`,
+    );
+  }
+  if (failedPages.length) {
+    failedPages.sort((a, b) => a - b);
+    console.warn(`[gemini] ${failedPages.length} page(s) failed: ${failedPages.join(', ')}`);
+  }
+
+  const total = requests.filter(Boolean).reduce(
     (a, u) => ({
       calls: a.calls + 1,
       promptTokens: a.promptTokens + u.promptTokens,
@@ -389,7 +473,8 @@ export async function extractFlyer(pages) {
     pagesPerRequest: PAGES_PER_REQUEST,
     pages: pages.length,
     products: flat.length,
-    requests,
+    failedPages,
+    requests: requests.filter(Boolean),
     total,
   });
 
@@ -398,8 +483,9 @@ export async function extractFlyer(pages) {
     usage: {
       model,
       pagesPerRequest: PAGES_PER_REQUEST,
-      perRequest: requests,
+      perRequest: requests.filter(Boolean),
       total,
+      failedPages,
     },
   };
 }

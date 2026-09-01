@@ -101,6 +101,7 @@ app.post('/flyers/extract', upload.single('file'), async (req, res) => {
       meta: {
         totalPages: rendered.totalPages,
         renderedPages: rendered.renderedPages,
+        failedPages: usage.failedPages ?? [],
       },
     });
   } catch (err) {

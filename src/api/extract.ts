@@ -37,7 +37,7 @@ export type FlyerPage = {
 export type ExtractResult = {
   pages: FlyerPage[];
   products: Product[];
-  meta?: {totalPages: number; renderedPages: number};
+  meta?: {totalPages: number; renderedPages: number; failedPages?: number[]};
 };
 
 export class NoServerError extends Error {}

@@ -117,14 +117,22 @@ function UploadScreen(): React.JSX.Element {
           contentContainerStyle={styles.grid}
           ListHeaderComponent={
             <View style={styles.gridHeader}>
-              <Text style={styles.count}>
-                {products.length} product{products.length === 1 ? '' : 's'}
-                {meta
-                  ? ` · ${meta.renderedPages} page${
-                      meta.renderedPages === 1 ? '' : 's'
-                    }`
-                  : ''}
-              </Text>
+              <View style={styles.headerText}>
+                <Text style={styles.count}>
+                  {products.length} product{products.length === 1 ? '' : 's'}
+                  {meta
+                    ? ` · ${meta.renderedPages} page${
+                        meta.renderedPages === 1 ? '' : 's'
+                      }`
+                    : ''}
+                </Text>
+                {meta?.failedPages && meta.failedPages.length > 0 ? (
+                  <Text style={styles.warn}>
+                    couldn't read page{meta.failedPages.length === 1 ? '' : 's'}{' '}
+                    {meta.failedPages.join(', ')}
+                  </Text>
+                ) : null}
+              </View>
               <Text style={styles.link} onPress={reset}>
                 New flyer
               </Text>
@@ -249,7 +257,9 @@ const styles = StyleSheet.create({
     gap: spacing.md,
     marginBottom: spacing.md,
   },
-  count: {color: colors.textMuted, fontSize: 13, flexShrink: 1},
+  headerText: {flexShrink: 1, gap: 2},
+  count: {color: colors.textMuted, fontSize: 13},
+  warn: {color: colors.danger, fontSize: 12},
   link: {color: colors.primary, fontSize: 14, fontWeight: '600'},
 });
 
