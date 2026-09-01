@@ -7,9 +7,10 @@ name: iOS unsigned IPA
 # Apple Developer Program and use `eas build -p ios --profile preview`.
 
 on:
-  workflow_dispatch:
+  workflow_dispatch: {}
   push:
-    tags: ['v*']
+    tags:
+      - 'v*'
 
 jobs:
   ipa:
