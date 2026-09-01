@@ -9,8 +9,9 @@ import {
   View,
 } from 'react-native';
 
-import {Product, formatValidity, isFlyerValid} from '../api/extract';
+import {Product, flyerStatus, formatValidity} from '../api/extract';
 import {colors, radius, spacing} from '../theme';
+import FlyerStatusPill from './FlyerStatusPill';
 
 type Props = {
   product: Product | null;
@@ -25,8 +26,9 @@ function ProductInfoModal({
   onClose,
   onViewInFlyer,
 }: Props): React.JSX.Element {
-  const valid =
-    product != null && isFlyerValid(product.validFrom, product.validTo);
+  const status = product
+    ? flyerStatus(product.validFrom, product.validTo)
+    : 'unknown';
   const validity = product
     ? formatValidity(product.validFrom, product.validTo)
     : '';
@@ -52,12 +54,9 @@ function ProductInfoModal({
                 ) : (
                   <Text style={styles.noImage}>no image</Text>
                 )}
-                {valid ? (
-                  <View style={styles.validPill}>
-                    <View style={styles.validDot} />
-                    <Text style={styles.validText}>Valid</Text>
-                  </View>
-                ) : null}
+                <View style={styles.statusPill}>
+                  <FlyerStatusPill status={status} />
+                </View>
                 <Pressable
                   onPress={onClose}
                   accessibilityRole="button"
@@ -152,26 +151,7 @@ const styles = StyleSheet.create({
   },
   heroImage: {width: '100%', height: '100%'},
   noImage: {color: colors.textMuted, fontSize: 13},
-  validPill: {
-    position: 'absolute',
-    top: spacing.sm,
-    left: spacing.sm,
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 5,
-    paddingVertical: 4,
-    paddingLeft: 7,
-    paddingRight: 10,
-    borderRadius: 999,
-    backgroundColor: colors.success,
-  },
-  validDot: {width: 5, height: 5, borderRadius: 3, backgroundColor: '#fff'},
-  validText: {
-    color: '#fff',
-    fontSize: 11,
-    fontWeight: '800',
-    letterSpacing: 0.3,
-  },
+  statusPill: {position: 'absolute', top: spacing.sm, left: spacing.sm},
   close: {
     position: 'absolute',
     top: spacing.sm,

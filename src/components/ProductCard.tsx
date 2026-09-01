@@ -1,8 +1,9 @@
 import React from 'react';
 import {Image, Pressable, StyleSheet, Text, View} from 'react-native';
 
-import {Product, formatShortDate, isFlyerValid} from '../api/extract';
+import {Product, flyerStatus, formatShortDate} from '../api/extract';
 import {colors, radius, spacing} from '../theme';
+import FlyerStatusPill from './FlyerStatusPill';
 
 const THUMB_HEIGHT = 116;
 
@@ -28,8 +29,19 @@ function ProductCard({product, width, onPress}: Props): React.JSX.Element {
   const lowConfidence =
     product.confidence != null && product.confidence < LOW_CONFIDENCE;
 
-  const valid = isFlyerValid(product.validFrom, product.validTo);
+  const status = flyerStatus(product.validFrom, product.validTo);
+  const startShort = formatShortDate(product.validFrom);
   const endShort = formatShortDate(product.validTo);
+
+  let dateLabel = '';
+  if (status === 'upcoming' && startShort) {
+    dateLabel = `Starts ${startShort}`;
+  } else if (status === 'expired' && endShort) {
+    dateLabel = `Ended ${endShort}`;
+  } else if (status === 'valid' && endShort) {
+    dateLabel = `Ends ${endShort}`;
+  }
+  const dateColor = status === 'expired' ? colors.danger : colors.textMuted;
 
   return (
     <Pressable
@@ -49,12 +61,9 @@ function ProductCard({product, width, onPress}: Props): React.JSX.Element {
         ) : (
           <Text style={styles.noImage}>no image</Text>
         )}
-        {valid ? (
-          <View style={styles.validPill}>
-            <View style={styles.validDot} />
-            <Text style={styles.validText}>Valid</Text>
-          </View>
-        ) : null}
+        <View style={styles.statusPill}>
+          <FlyerStatusPill status={status} compact />
+        </View>
         {lowConfidence ? (
           <View
             style={styles.badge}
@@ -74,11 +83,11 @@ function ProductCard({product, width, onPress}: Props): React.JSX.Element {
           <Text style={styles.page}>p.{product.page}</Text>
         </View>
 
-        {endShort ? (
+        {dateLabel ? (
           <View style={styles.dateRow}>
-            <CalendarMark color={valid ? colors.textMuted : colors.danger} />
-            <Text style={[styles.dateText, !valid && styles.dateEnded]}>
-              {valid ? `Ends ${endShort}` : `Ended ${endShort}`}
+            <CalendarMark color={dateColor} />
+            <Text style={[styles.dateText, {color: dateColor}]}>
+              {dateLabel}
             </Text>
           </View>
         ) : null}
@@ -108,26 +117,7 @@ const styles = StyleSheet.create({
   },
   thumbImage: {width: '100%', height: '100%'},
   noImage: {color: colors.textMuted, fontSize: 12},
-  validPill: {
-    position: 'absolute',
-    top: 6,
-    left: 6,
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 4,
-    paddingVertical: 3,
-    paddingLeft: 6,
-    paddingRight: 8,
-    borderRadius: 999,
-    backgroundColor: colors.success,
-  },
-  validDot: {width: 4, height: 4, borderRadius: 2, backgroundColor: '#fff'},
-  validText: {
-    color: '#fff',
-    fontSize: 10,
-    fontWeight: '800',
-    letterSpacing: 0.2,
-  },
+  statusPill: {position: 'absolute', top: 6, left: 6},
   badge: {
     position: 'absolute',
     top: 6,
@@ -151,8 +141,7 @@ const styles = StyleSheet.create({
   price: {color: colors.primary, fontSize: 15, fontWeight: '700'},
   page: {color: colors.textMuted, fontSize: 11},
   dateRow: {flexDirection: 'row', alignItems: 'center', gap: 5},
-  dateText: {color: colors.textMuted, fontSize: 11, lineHeight: 15},
-  dateEnded: {color: colors.danger},
+  dateText: {fontSize: 11, lineHeight: 15},
   cal: {
     width: 11,
     height: 11,

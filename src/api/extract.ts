@@ -148,13 +148,34 @@ export function todayIso(): string {
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
 }
 
-/** True when today falls within [from, to], both days included. */
-export function isFlyerValid(from: string, to: string): boolean {
-  if (!ISO_DATE.test(from) || !ISO_DATE.test(to)) {
-    return false;
+/**
+ * Where today sits relative to a flyer's price window:
+ * - `upcoming` — the start date is still in the future
+ * - `valid`    — today is within [from, to] (both days included)
+ * - `expired`  — today is past the end date
+ * - `unknown`  — no usable dates on the flyer
+ */
+export type FlyerStatus = 'valid' | 'expired' | 'upcoming' | 'unknown';
+
+export function flyerStatus(from: string, to: string): FlyerStatus {
+  const hasFrom = ISO_DATE.test(from);
+  const hasTo = ISO_DATE.test(to);
+  if (!hasFrom && !hasTo) {
+    return 'unknown';
   }
   const t = todayIso();
-  return from <= t && t <= to;
+  if (hasFrom && from > t) {
+    return 'upcoming';
+  }
+  if (hasTo && t > to) {
+    return 'expired';
+  }
+  return 'valid';
+}
+
+/** True when today falls within [from, to], both days included. */
+export function isFlyerValid(from: string, to: string): boolean {
+  return flyerStatus(from, to) === 'valid';
 }
 
 /** "Sep 2" — short month + day, or '' if not a usable "YYYY-MM-DD". */
