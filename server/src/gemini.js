@@ -54,6 +54,8 @@ For each product:
   cents: a big "29" with a superscript "97" is 29.97, NOT 2997. "$13" + "96" is
   13.96. "34¢" is 0.34. "$3.17/lb" is 3.17. If there is no price, use 0. If the
   tile shows a struck-through "was" price and a current price, use the current one.
+  If a price sits between two tiles and you cannot tell which product it belongs
+  to, use 0 and an empty "price" string, and lower "confidence" — do not guess.
 - "price": the same price formatted as text, with the decimal and any unit —
   "$29.97", "$13.96", "34¢", "$3.17/lb", "$1.97 each". Never write it as a run of
   digits with no separator.
@@ -66,6 +68,16 @@ For each product:
 - "confidence": integer 0-100, how sure you are that name, price and box are all
   correct for THIS product. Lower it when digits are ambiguous, the tile is small
   or crowded, or text could belong to a neighbour.
+
+One price shared by two products: if a single price clearly covers TWO OR MORE
+distinct products in the same tile (different product lines — e.g. "Tylenol Extra
+Strength" bottles next to a "Precise Pain Relief Cream" — not just size/flavour
+variants or front/back shots of one item), output a SEPARATE row for EACH
+product: same "price" and "priceValue" on every row, but each row with its own
+"name", its own "info", and its own tight "box" around just that one product's
+photo and label. If instead it is ONE product line shown as several package shots
+(two sizes at one price, front/back, "selected varieties"), that is ONE row with
+one box enclosing all its shots.
 
 Return [] if there are no products.`;
 
