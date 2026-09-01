@@ -1,10 +1,20 @@
-import React from 'react';
-import {StyleSheet, Text, TouchableOpacity, View} from 'react-native';
+import React, {useEffect, useRef, useState} from 'react';
+import {
+  Animated,
+  LayoutChangeEvent,
+  LayoutRectangle,
+  StyleSheet,
+  Text,
+  TouchableOpacity,
+  View,
+} from 'react-native';
 
 export type TabKey = 'upload' | 'search' | 'chat';
 
 const ACCENT = '#4285f4';
 const MUTED = '#5f6368';
+const BAR_PADDING = 6;
+const ITEM_HEIGHT = 44;
 
 type IconProps = {color: string};
 
@@ -54,25 +64,109 @@ type Props = {
 };
 
 function PillNavBar({activeTab, onTabPress}: Props): React.JSX.Element {
+  // Measured frame of each tab within the bar — the highlight springs to
+  // whichever one is active. Re-measured whenever a tab grows/shrinks
+  // (a label mounting/unmounting changes its width).
+  const layouts = useRef<Partial<Record<TabKey, LayoutRectangle>>>({}).current;
+  const [ready, setReady] = useState(false);
+
+  const x = useRef(new Animated.Value(0)).current;
+  const width = useRef(new Animated.Value(0)).current;
+  const pop = useRef(new Animated.Value(1)).current;
+
+  const springTo = (key: TabKey, initial = false) => {
+    const l = layouts[key];
+    if (!l) {
+      return;
+    }
+    if (initial) {
+      x.setValue(l.x);
+      width.setValue(l.width);
+      return;
+    }
+    Animated.parallel([
+      // Bouncy on travel — this is the "spring" of the mockup.
+      Animated.spring(x, {
+        toValue: l.x,
+        useNativeDriver: false,
+        stiffness: 190,
+        damping: 15,
+        mass: 1,
+      }),
+      // Snappier on resize so the pill doesn't visibly overshoot its width.
+      Animated.spring(width, {
+        toValue: l.width,
+        useNativeDriver: false,
+        stiffness: 220,
+        damping: 26,
+        mass: 1,
+      }),
+      // Small scale pop on landing.
+      Animated.sequence([
+        Animated.timing(pop, {
+          toValue: 1.06,
+          duration: 110,
+          useNativeDriver: false,
+        }),
+        Animated.spring(pop, {
+          toValue: 1,
+          useNativeDriver: false,
+          stiffness: 240,
+          damping: 12,
+        }),
+      ]),
+    ]).start();
+  };
+
+  useEffect(() => {
+    springTo(activeTab);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTab]);
+
+  const onTabLayout = (key: TabKey) => (e: LayoutChangeEvent) => {
+    layouts[key] = e.nativeEvent.layout;
+    if (key !== activeTab) {
+      return;
+    }
+    if (!ready) {
+      springTo(key, true);
+      setReady(true);
+    } else {
+      springTo(key);
+    }
+  };
+
   return (
     <View style={styles.wrap} pointerEvents="box-none">
       <View style={styles.bar}>
-        {TABS.map(({key, label, Icon}) => {
-          const active = key === activeTab;
-          return (
-            <TouchableOpacity
-              key={key}
-              activeOpacity={0.7}
-              accessibilityRole="button"
-              accessibilityLabel={label}
-              accessibilityState={{selected: active}}
-              onPress={() => onTabPress(key)}
-              style={[styles.item, active && styles.itemActive]}>
-              <Icon color={active ? ACCENT : MUTED} />
-              {active ? <Text style={styles.label}>{label}</Text> : null}
-            </TouchableOpacity>
-          );
-        })}
+        <View style={styles.track}>
+          {ready ? (
+            <Animated.View
+              pointerEvents="none"
+              style={[
+                styles.highlight,
+                {width, transform: [{translateX: x}, {scale: pop}]},
+              ]}
+            />
+          ) : null}
+          {TABS.map(({key, label, Icon}) => {
+            const active = key === activeTab;
+            return (
+              <TouchableOpacity
+                key={key}
+                activeOpacity={0.7}
+                accessibilityRole="button"
+                accessibilityLabel={label}
+                accessibilityState={{selected: active}}
+                onPress={() => onTabPress(key)}
+                onLayout={onTabLayout(key)}
+                style={styles.item}>
+                <Icon color={active ? ACCENT : MUTED} />
+                {active ? <Text style={styles.label}>{label}</Text> : null}
+              </TouchableOpacity>
+            );
+          })}
+        </View>
       </View>
     </View>
   );
@@ -87,10 +181,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   bar: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 4,
-    padding: 6,
+    padding: BAR_PADDING,
     borderRadius: 28,
     backgroundColor: '#fff',
     borderWidth: StyleSheet.hairlineWidth,
@@ -101,17 +192,27 @@ const styles = StyleSheet.create({
     shadowRadius: 14,
     elevation: 10,
   },
+  track: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+  },
+  highlight: {
+    position: 'absolute',
+    left: 0,
+    top: 0,
+    height: ITEM_HEIGHT,
+    borderRadius: 22,
+    backgroundColor: 'rgba(66, 133, 244, 0.12)',
+  },
   item: {
-    minHeight: 44,
+    minHeight: ITEM_HEIGHT,
     paddingHorizontal: 16,
     borderRadius: 22,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
     gap: 8,
-  },
-  itemActive: {
-    backgroundColor: 'rgba(66, 133, 244, 0.12)',
   },
   label: {
     color: ACCENT,
