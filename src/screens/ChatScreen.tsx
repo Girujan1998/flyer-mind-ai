@@ -1,11 +1,11 @@
 import React from 'react';
 import {StyleSheet, Text, View} from 'react-native';
 
-function HomeScreen(): React.JSX.Element {
+function ChatScreen(): React.JSX.Element {
   return (
     <View style={styles.container}>
-      <Text style={styles.title}>Flyer Mind AI</Text>
-      <Text style={styles.subtitle}>Fresh start — bare React Native.</Text>
+      <Text style={styles.title}>Chat</Text>
+      <Text style={styles.subtitle}>Ask about your flyers.</Text>
     </View>
   );
 }
@@ -15,7 +15,8 @@ const styles = StyleSheet.create({
     flex: 1,
     alignItems: 'center',
     justifyContent: 'center',
-    padding: 24,
+    paddingHorizontal: 24,
+    paddingBottom: 96,
   },
   title: {
     fontSize: 24,
@@ -29,4 +30,4 @@ const styles = StyleSheet.create({
   },
 });
 
-export default HomeScreen;
+export default ChatScreen;

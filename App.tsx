@@ -1,4 +1,4 @@
-import React from 'react';
+import React, {useState} from 'react';
 import {
   SafeAreaView,
   StatusBar,
@@ -6,15 +6,31 @@ import {
   useColorScheme,
 } from 'react-native';
 
-import HomeScreen from './src/screens/HomeScreen';
+import PillNavBar, {TabKey} from './src/navigation/PillNavBar';
+import ChatScreen from './src/screens/ChatScreen';
+import SearchScreen from './src/screens/SearchScreen';
+import UploadScreen from './src/screens/UploadScreen';
+
+function ActiveScreen({tab}: {tab: TabKey}): React.JSX.Element {
+  switch (tab) {
+    case 'search':
+      return <SearchScreen />;
+    case 'chat':
+      return <ChatScreen />;
+    default:
+      return <UploadScreen />;
+  }
+}
 
 function App(): React.JSX.Element {
   const isDarkMode = useColorScheme() === 'dark';
+  const [activeTab, setActiveTab] = useState<TabKey>('upload');
 
   return (
     <SafeAreaView style={styles.container}>
       <StatusBar barStyle={isDarkMode ? 'light-content' : 'dark-content'} />
-      <HomeScreen />
+      <ActiveScreen tab={activeTab} />
+      <PillNavBar activeTab={activeTab} onTabPress={setActiveTab} />
     </SafeAreaView>
   );
 }
