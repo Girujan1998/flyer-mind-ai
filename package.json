@@ -11,11 +11,16 @@
     "format": "prettier --write \"**/*.{ts,tsx,js,json,md}\"",
     "typecheck": "tsc --noEmit",
     "test": "jest",
-    "test:watch": "jest --watch"
+    "test:watch": "jest --watch",
+    "prebuild": "expo prebuild",
+    "build:ipa": "bash scripts/build-ios-unsigned-ipa.sh"
   },
   "dependencies": {
     "expo": "~51.0.28",
+    "expo-asset": "~10.0.10",
     "expo-constants": "~16.0.2",
+    "expo-document-picker": "~12.0.2",
+    "expo-file-system": "~17.0.1",
     "expo-linking": "~6.3.1",
     "expo-router": "~3.5.23",
     "expo-status-bar": "~1.12.1",

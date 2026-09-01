@@ -12,3 +12,9 @@ jest.mock('expo-constants', () => ({
     },
   },
 }));
+
+jest.mock('expo-asset', () => ({
+  Asset: {
+    fromModule: () => ({ localUri: 'file:///sample.pdf', uri: 'file:///sample.pdf' }),
+  },
+}));

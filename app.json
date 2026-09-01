@@ -14,7 +14,10 @@
     },
     "ios": {
       "supportsTablet": true,
-      "bundleIdentifier": "com.flyermindai.app"
+      "bundleIdentifier": "com.flyermindai.app",
+      "infoPlist": {
+        "ITSAppUsesNonExemptEncryption": false
+      }
     },
     "android": {
       "package": "com.flyermindai.app",
@@ -30,13 +33,21 @@
       "output": "static",
       "favicon": "./assets/favicon.png"
     },
-    "plugins": ["expo-router"],
+    "plugins": [
+      "expo-router"
+    ],
     "experiments": {
       "typedRoutes": true
     },
     "extra": {
-      "apiBaseUrl": "https://api.example.com",
-      "aiModel": "claude-sonnet-5"
+      "apiBaseUrl": "http://localhost:3001",
+      "aiModel": "claude-sonnet-5",
+      "router": {
+        "origin": false
+      },
+      "eas": {
+        "projectId": "7a70c496-deb2-4118-9545-2800a94138d3"
+      }
     }
   }
 }

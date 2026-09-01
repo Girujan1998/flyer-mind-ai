@@ -1,0 +1,19 @@
+{
+  "name": "flyer-mind-ai-server",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "PDF flyer -> Gemini product extraction API for the Flyer Mind AI app",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node --watch src/index.js"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.21.2",
+    "multer": "^1.4.5-lts.1",
+    "mupdf": "^1.0.0"
+  }
+}
