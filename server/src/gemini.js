@@ -81,6 +81,133 @@ one box enclosing all its shots.
 
 Return [] if there are no products.`;
 
+// --- Flyer-level metadata (store + validity window) --------------------------
+// A separate, cheap call against page 1 only. Kept out of the per-product schema
+// so the products array stays clean and this can't truncate it.
+
+function metaPrompt(year) {
+  return `This is page 1 of a retail store flyer / weekly circular. Read only what is
+printed on this page and return ONE JSON object (not an array):
+
+- "store": the retailer name from the largest logo or masthead — the banner only
+  ("Walmart", "Food Basics", "No Frills", "Loblaws", "Costco"). No slogan, no
+  street address, no "Supercentre"/"Weekly Flyer" suffix. "" if no name is visible.
+- "validFrom": the FIRST day the flyer's prices are in effect, as "YYYY-MM-DD".
+  Flyers print this as "Prices in effect Thursday, August 28", "Valid Aug 28 –
+  Sep 3", "Sale dates 08/28–09/03", "Semaine du 28 août". Take the START of the
+  range. If the year is not printed, use ${year}; but if that puts the date more
+  than ~2 months in the FUTURE, use ${year - 1} instead.
+- "validTo": the LAST day the prices are in effect, same "YYYY-MM-DD" format —
+  the END of the range. If only one date is printed, set validTo = validFrom.
+- "confidence": integer 0-100 — how sure you are of the store name AND both dates
+  together. Lower it a lot if you are inferring a year or can't see a clear range.
+
+Use "" for validFrom / validTo if no on-page date tells you the range. Do not
+guess a range from the season or from the page's copyright date.`;
+}
+
+const META_SCHEMA = {
+  type: 'OBJECT',
+  properties: {
+    store: {type: 'STRING'},
+    validFrom: {type: 'STRING'},
+    validTo: {type: 'STRING'},
+    confidence: {type: 'INTEGER'},
+  },
+  required: ['store', 'validFrom', 'validTo', 'confidence'],
+};
+
+const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
+
+// Keep only a well-formed, real calendar date; anything else becomes ''.
+function cleanDate(value) {
+  const s = (value ?? '').toString().trim();
+  if (!ISO_DATE.test(s)) {
+    return '';
+  }
+  const d = new Date(`${s}T00:00:00Z`);
+  return Number.isNaN(d.getTime()) || d.toISOString().slice(0, 10) !== s
+    ? ''
+    : s;
+}
+
+/**
+ * Pull the store name and price-validity window off page 1.
+ *
+ * @param {string} page1Jpeg  base64 JPEG of page 1 (no data: prefix)
+ * @returns {Promise<{ meta: { store: string, validFrom: string, validTo: string, confidence: number|null }, usage: object }>}
+ */
+export async function extractFlyerMeta(page1Jpeg) {
+  const empty = {store: '', validFrom: '', validTo: '', confidence: null};
+
+  if (process.env.GEMINI_API_KEY === 'MOCK') {
+    return {
+      meta: {
+        store: 'Mock Mart',
+        validFrom: '2026-01-01',
+        validTo: '2026-01-07',
+        confidence: 80,
+      },
+      usage: {mock: true},
+    };
+  }
+
+  const {apiKey, model} = config();
+  const json = await callGemini(
+    {
+      contents: [
+        {
+          parts: [
+            {text: metaPrompt(new Date().getFullYear())},
+            {inline_data: {mime_type: 'image/jpeg', data: page1Jpeg}},
+          ],
+        },
+      ],
+      generationConfig: {
+        temperature: 0,
+        responseMimeType: 'application/json',
+        responseSchema: META_SCHEMA,
+        thinkingConfig: {thinkingBudget: 1024},
+        maxOutputTokens: 2048,
+      },
+    },
+    apiKey,
+    model,
+  );
+
+  const text = json.candidates?.[0]?.content?.parts?.[0]?.text;
+  const usage = readUsage(json);
+  if (!text) {
+    return {meta: empty, usage};
+  }
+
+  let meta = empty;
+  try {
+    const v = JSON.parse(text) || {};
+    const confidence = Number(v.confidence);
+    let validFrom = cleanDate(v.validFrom);
+    let validTo = cleanDate(v.validTo);
+    if (validFrom && !validTo) {
+      validTo = validFrom;
+    }
+    if (validFrom && validTo && validTo < validFrom) {
+      [validFrom, validTo] = [validTo, validFrom];
+    }
+    meta = {
+      store: (v.store || '').toString().trim().slice(0, 120),
+      validFrom,
+      validTo,
+      confidence: isFinite(confidence)
+        ? Math.max(0, Math.min(100, Math.round(confidence)))
+        : null,
+    };
+  } catch {
+    // leave meta empty — the flyer still saves, just without store/dates
+  }
+
+  return {meta, usage};
+}
+
 const RESPONSE_SCHEMA = {
   type: 'ARRAY',
   items: {

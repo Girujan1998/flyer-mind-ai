@@ -26,6 +26,10 @@ db.exec(`
     hash           TEXT UNIQUE,
     total_pages    INTEGER,
     rendered_pages INTEGER,
+    store          TEXT,
+    valid_from     TEXT,
+    valid_to       TEXT,
+    meta_confidence INTEGER,
     created_at     TEXT NOT NULL
   );
   CREATE TABLE IF NOT EXISTS pages (
@@ -51,11 +55,27 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_products_created ON products(created_at DESC);
 `);
 
+// Add the flyer-meta columns to a database created before they existed.
+for (const col of [
+  'store TEXT',
+  'valid_from TEXT',
+  'valid_to TEXT',
+  'meta_confidence INTEGER',
+]) {
+  try {
+    db.exec(`ALTER TABLE flyers ADD COLUMN ${col}`);
+  } catch {
+    // already there
+  }
+}
+
 const stmts = {
   flyerByHash: db.prepare('SELECT * FROM flyers WHERE hash = ?'),
   insertFlyer: db.prepare(
-    `INSERT INTO flyers (id, name, hash, total_pages, rendered_pages, created_at)
-     VALUES (@id, @name, @hash, @total_pages, @rendered_pages, @created_at)`,
+    `INSERT INTO flyers
+       (id, name, hash, total_pages, rendered_pages, store, valid_from, valid_to, meta_confidence, created_at)
+     VALUES
+       (@id, @name, @hash, @total_pages, @rendered_pages, @store, @valid_from, @valid_to, @meta_confidence, @created_at)`,
   ),
   insertPage: db.prepare(
     `INSERT INTO pages (flyer_id, page, width, height)
@@ -87,7 +107,7 @@ export function productCountForFlyer(flyerId) {
  * renderThumbs(). Returns { flyerId, savedProducts }.
  */
 export const saveExtraction = db.transaction(
-  ({name, hash, totalPages, renderedPages, pages, products, thumbs}) => {
+  ({name, hash, totalPages, renderedPages, pages, products, thumbs, meta}) => {
     const flyerId = randomUUID();
     const now = new Date().toISOString();
 
@@ -97,6 +117,10 @@ export const saveExtraction = db.transaction(
       hash,
       total_pages: totalPages,
       rendered_pages: renderedPages,
+      store: meta?.store || null,
+      valid_from: meta?.validFrom || null,
+      valid_to: meta?.validTo || null,
+      meta_confidence: meta?.confidence ?? null,
       created_at: now,
     });
 
@@ -142,7 +166,9 @@ export const saveExtraction = db.transaction(
   },
 );
 
-function whereFor(q) {
+function whereFor(q, prefix = '') {
+  const name = `${prefix}name`;
+  const info = `${prefix}info`;
   const words = String(q || '')
     .trim()
     .split(/\s+/)
@@ -152,7 +178,7 @@ function whereFor(q) {
   return {
     clause:
       'WHERE ' +
-      words.map(() => '(name LIKE ? OR info LIKE ?)').join(' AND '),
+      words.map(() => `(${name} LIKE ? OR ${info} LIKE ?)`).join(' AND '),
     params: words.flatMap(w => [`%${w}%`, `%${w}%`]),
   };
 }
@@ -165,17 +191,21 @@ function whereFor(q) {
 export function searchProducts({q = '', limit = 20, offset = 0}, baseUrl) {
   const lim = Math.max(1, Math.min(100, Number(limit) || 20));
   const off = Math.max(0, Number(offset) || 0);
-  const {clause, params} = whereFor(q);
-
+  const flat = whereFor(q);
   const total = db
-    .prepare(`SELECT COUNT(*) AS n FROM products ${clause}`)
-    .get(...params).n;
+    .prepare(`SELECT COUNT(*) AS n FROM products ${flat.clause}`)
+    .get(...flat.params).n;
 
+  const {clause, params} = whereFor(q, 'p.');
   const rows = db
     .prepare(
-      `SELECT id, flyer_id, page, name, price, price_value, info, box, confidence, has_thumb
-         FROM products ${clause}
-        ORDER BY created_at DESC, rowid DESC
+      `SELECT p.id, p.flyer_id, p.page, p.name, p.price, p.price_value, p.info,
+              p.box, p.confidence, p.has_thumb,
+              f.store, f.valid_from, f.valid_to
+         FROM products p
+         JOIN flyers f ON f.id = p.flyer_id
+         ${clause}
+        ORDER BY p.created_at DESC, p.rowid DESC
         LIMIT ? OFFSET ?`,
     )
     .all(...params, lim, off);
@@ -190,6 +220,9 @@ export function searchProducts({q = '', limit = 20, offset = 0}, baseUrl) {
     info: r.info || '',
     box: r.box ? JSON.parse(r.box) : null,
     confidence: r.confidence,
+    store: r.store || '',
+    validFrom: r.valid_from || '',
+    validTo: r.valid_to || '',
     thumb: r.has_thumb
       ? `${baseUrl}/thumbs/${r.flyer_id}/${r.id}.jpg`
       : null,

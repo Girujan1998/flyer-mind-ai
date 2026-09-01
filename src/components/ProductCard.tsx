@@ -57,6 +57,11 @@ function ProductCard({product, width, onPress}: Props): React.JSX.Element {
             {product.info}
           </Text>
         ) : null}
+        {product.store ? (
+          <Text style={styles.store} numberOfLines={1}>
+            {product.store}
+          </Text>
+        ) : null}
       </View>
     </Pressable>
   );
@@ -101,6 +106,13 @@ const styles = StyleSheet.create({
   price: {color: colors.primary, fontSize: 15, fontWeight: '700'},
   page: {color: colors.textMuted, fontSize: 11},
   info: {color: colors.textMuted, fontSize: 11, lineHeight: 15},
+  store: {
+    color: colors.textMuted,
+    fontSize: 10,
+    fontWeight: '600',
+    textTransform: 'uppercase',
+    letterSpacing: 0.4,
+  },
 });
 
 export default ProductCard;

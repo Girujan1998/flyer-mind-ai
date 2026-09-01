@@ -26,6 +26,12 @@ export type Product = {
   confidence: number | null;
   /** URL of a small pre-cropped thumbnail of this product; null if none. */
   thumb: string | null;
+  /** Store this flyer is for, e.g. "Food Basics"; '' if unknown. */
+  store: string;
+  /** First day the flyer prices are in effect, "YYYY-MM-DD"; '' if unknown. */
+  validFrom: string;
+  /** Last day the flyer prices are in effect, "YYYY-MM-DD"; '' if unknown. */
+  validTo: string;
 };
 
 export type FlyerPage = {
@@ -67,6 +73,11 @@ export type UploadResult = {
   savedProducts: number;
   renderedPages: number;
   totalPages: number;
+  /** Store the flyer is for, e.g. "Food Basics"; '' if the model couldn't tell. */
+  store: string;
+  /** Price-validity window, "YYYY-MM-DD"; '' if not printed on page 1. */
+  validFrom: string;
+  validTo: string;
   failedPages: number[];
   /** true when this exact PDF was already stored — not re-extracted. */
   reused: boolean;
@@ -109,6 +120,31 @@ export function searchProducts(params: {
     .filter(Boolean)
     .join('&');
   return api<SearchResult>(`/products?${qs}`);
+}
+
+/**
+ * Format a flyer validity window for display, e.g. "Aug 27 – Sep 2, 2026".
+ * Returns '' if neither date is a usable "YYYY-MM-DD".
+ */
+export function formatValidity(from: string, to: string): string {
+  const parse = (s: string) =>
+    /^\d{4}-\d{2}-\d{2}$/.test(s) ? new Date(`${s}T00:00:00`) : null;
+  const a = parse(from);
+  const b = parse(to);
+  if (!a && !b) {
+    return '';
+  }
+  const md = (d: Date) =>
+    d.toLocaleDateString('en-US', {month: 'short', day: 'numeric'});
+  if (a && b) {
+    const sameDay = from === to;
+    if (sameDay) {
+      return `${md(a)}, ${a.getFullYear()}`;
+    }
+    return `${md(a)} – ${md(b)}, ${b.getFullYear()}`;
+  }
+  const one = (a ?? b) as Date;
+  return `${md(one)}, ${one.getFullYear()}`;
 }
 
 /** Convert a Gemini box to a pixel rect on the page, padded and clamped. */

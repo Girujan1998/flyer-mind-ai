@@ -38,6 +38,23 @@ You'll see one `[req] <phone-ip> POST /flyers/extract 200 41000ms` line per
 upload, then the per-page `[gemini] pages N …` breakdown, a `[gemini] TOTAL`,
 and any `truncated` / `FAILED` warnings. `logs/` is gitignored.
 
+## Store name + validity window
+
+On upload, one extra Gemini call runs against **page 1 only** to read the
+retailer name and the price-validity date range ("Prices in effect Aug 27 –
+Sep 2"). It is stored on the `flyers` row (`store`, `valid_from`, `valid_to`,
+`meta_confidence`) and returned on every product in `GET /products`.
+
+- Costs ~1,700–1,900 tokens per flyer (mostly the page-1 image) and **one extra
+  request** — it runs in parallel with the product extraction, so no extra
+  wall-clock time.
+- When a flyer prints the year, both dates land exactly. When the year is
+  **not** printed (common on Walmart circulars) the model assumes the current
+  year — the month/day are right, the year may be off. `""` for both dates if
+  no range is printed on page 1.
+- `node scripts/test-flyer-meta.mjs <file.pdf> ...` runs just this call (no DB,
+  no product extraction) and prints the result + token usage.
+
 ## Storage
 
 Extracted products are **saved to SQLite** (`data/flyer.db`, better-sqlite3).
@@ -62,6 +79,7 @@ Extracts, **saves to the DB**, and returns a summary only:
 {
   "flyerId": "…", "name": "flyer.pdf",
   "savedProducts": 16, "renderedPages": 1, "totalPages": 1,
+  "store": "Food Basics", "validFrom": "2026-08-27", "validTo": "2026-09-02",
   "failedPages": [], "reused": false
 }
 ```
@@ -76,6 +94,7 @@ newest first.
   "products": [
     { "id": "…", "flyerId": "…", "page": 1, "name": "Corn", "price": "34¢",
       "priceValue": 0.34, "info": "…", "box": [230,60,360,300], "confidence": 95,
+      "store": "Food Basics", "validFrom": "2026-08-27", "validTo": "2026-09-02",
       "thumb": "http://<host>/thumbs/<flyerId>/<id>.jpg" }
   ],
   "pages": [

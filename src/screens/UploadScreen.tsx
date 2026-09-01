@@ -13,6 +13,7 @@ import {
   SelectedPdf,
   UploadResult,
   extractFlyer,
+  formatValidity,
 } from '../api/extract';
 import {colors, radius, spacing} from '../theme';
 
@@ -85,8 +86,17 @@ function UploadScreen(): React.JSX.Element {
   };
 
   if (phase.kind === 'done') {
-    const {savedProducts, renderedPages, failedPages, reused, name} =
-      phase.result;
+    const {
+      savedProducts,
+      renderedPages,
+      failedPages,
+      reused,
+      name,
+      store,
+      validFrom,
+      validTo,
+    } = phase.result;
+    const validity = formatValidity(validFrom, validTo);
     return (
       <View style={styles.container}>
         <View style={styles.doneCard}>
@@ -94,6 +104,10 @@ function UploadScreen(): React.JSX.Element {
           <Text style={styles.doneTitle}>
             {reused ? 'Already extracted' : 'Saved'}
           </Text>
+          {store ? <Text style={styles.doneStore}>{store}</Text> : null}
+          {validity ? (
+            <Text style={styles.doneValidity}>Prices valid {validity}</Text>
+          ) : null}
           <Text style={styles.doneBody}>
             {savedProducts} product{savedProducts === 1 ? '' : 's'} from {name}
             {'\n'}
@@ -224,6 +238,8 @@ const styles = StyleSheet.create({
     marginBottom: spacing.xs,
   },
   doneTitle: {fontSize: 18, fontWeight: '700', color: colors.text},
+  doneStore: {fontSize: 15, fontWeight: '600', color: colors.text},
+  doneValidity: {fontSize: 13, color: colors.textMuted},
   doneBody: {
     fontSize: 14,
     color: colors.textMuted,

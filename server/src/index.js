@@ -17,7 +17,7 @@ import {
   searchProducts,
   totalProducts,
 } from './db.js';
-import {extractFlyer} from './gemini.js';
+import {extractFlyer, extractFlyerMeta} from './gemini.js';
 import {renderPdf} from './pdf.js';
 import {renderThumbs} from './thumbs.js';
 
@@ -107,6 +107,9 @@ app.post('/flyers/extract', upload.single('file'), async (req, res) => {
         savedProducts: productCountForFlyer(existing.id),
         renderedPages: existing.rendered_pages,
         totalPages: existing.total_pages,
+        store: existing.store || '',
+        validFrom: existing.valid_from || '',
+        validTo: existing.valid_to || '',
         failedPages: [],
         reused: true,
       });
@@ -129,9 +132,26 @@ app.post('/flyers/extract', upload.single('file'), async (req, res) => {
     }
 
     const t0 = Date.now();
-    const {products, usage} = await extractFlyer(
-      rendered.pages.map(p => ({page: p.page, jpeg: p.jpegBase64})),
-    );
+    const [{products, usage}, metaResult] = await Promise.all([
+      extractFlyer(rendered.pages.map(p => ({page: p.page, jpeg: p.jpegBase64}))),
+      extractFlyerMeta(rendered.pages[0].jpegBase64).catch(err => {
+        console.warn(`[gemini] flyer-meta failed: ${err.message}`);
+        return null;
+      }),
+    ]);
+
+    const meta = metaResult?.meta ?? null;
+    if (metaResult) {
+      const mu = metaResult.usage || {};
+      console.log(
+        `[gemini] flyer-meta  store=${JSON.stringify(meta.store)}  ` +
+          `valid=${meta.validFrom || '?'}..${meta.validTo || '?'}  ` +
+          `confidence=${meta.confidence ?? '?'}  ` +
+          `prompt=${mu.promptTokens ?? 0} (image ${mu.promptImageTokens ?? 0})  ` +
+          `output=${mu.outputTokens ?? 0}  thoughts=${mu.thoughtsTokens ?? 0}  ` +
+          `total=${mu.totalTokens ?? 0}`,
+      );
+    }
 
     let thumbs;
     try {
@@ -148,6 +168,7 @@ app.post('/flyers/extract', upload.single('file'), async (req, res) => {
       pages: rendered.pages,
       products,
       thumbs,
+      meta,
     });
 
     console.log(
@@ -163,6 +184,9 @@ app.post('/flyers/extract', upload.single('file'), async (req, res) => {
       savedProducts,
       renderedPages: rendered.renderedPages,
       totalPages: rendered.totalPages,
+      store: meta?.store || '',
+      validFrom: meta?.validFrom || '',
+      validTo: meta?.validTo || '',
       failedPages: usage.failedPages ?? [],
       reused: false,
     });
