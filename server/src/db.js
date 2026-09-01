@@ -1,6 +1,6 @@
 // Persistent store for extracted products. SQLite (better-sqlite3) at
-// data/flyer.db; rendered page JPEGs on disk at data/pages/<flyerId>/<page>.jpg.
-// data/ is gitignored.
+// data/flyer.db; page JPEGs at data/pages/<flyerId>/<page>.jpg and per-product
+// crop thumbnails at data/thumbs/<flyerId>/<productId>.jpg. data/ is gitignored.
 
 import {randomUUID} from 'node:crypto';
 import {mkdirSync, writeFileSync} from 'node:fs';
@@ -11,7 +11,9 @@ import Database from 'better-sqlite3';
 
 const DATA_DIR = join(dirname(fileURLToPath(import.meta.url)), '..', 'data');
 export const PAGES_DIR = join(DATA_DIR, 'pages');
+export const THUMBS_DIR = join(DATA_DIR, 'thumbs');
 mkdirSync(PAGES_DIR, {recursive: true});
+mkdirSync(THUMBS_DIR, {recursive: true});
 
 const db = new Database(join(DATA_DIR, 'flyer.db'));
 db.pragma('journal_mode = WAL');
@@ -43,6 +45,7 @@ db.exec(`
     info        TEXT,
     box         TEXT,
     confidence  INTEGER,
+    has_thumb   INTEGER NOT NULL DEFAULT 0,
     created_at  TEXT NOT NULL
   );
   CREATE INDEX IF NOT EXISTS idx_products_created ON products(created_at DESC);
@@ -60,9 +63,9 @@ const stmts = {
   ),
   insertProduct: db.prepare(
     `INSERT INTO products
-       (id, flyer_id, page, name, price, price_value, info, box, confidence, created_at)
+       (id, flyer_id, page, name, price, price_value, info, box, confidence, has_thumb, created_at)
      VALUES
-       (@id, @flyer_id, @page, @name, @price, @price_value, @info, @box, @confidence, @created_at)`,
+       (@id, @flyer_id, @page, @name, @price, @price_value, @info, @box, @confidence, @has_thumb, @created_at)`,
   ),
   countProducts: db.prepare('SELECT COUNT(*) AS n FROM products'),
   productsForFlyer: db.prepare(
@@ -80,11 +83,11 @@ export function productCountForFlyer(flyerId) {
 
 /**
  * Persist one extraction. `pages` carry `jpegBase64`; `products` are the shape
- * gemini.js returns (page, name, price, priceValue, info, box, confidence).
- * Returns { flyerId, savedProducts }.
+ * gemini.js returns; `thumbs` is a Map<productIndex, JPEG Buffer> from
+ * renderThumbs(). Returns { flyerId, savedProducts }.
  */
 export const saveExtraction = db.transaction(
-  ({name, hash, totalPages, renderedPages, pages, products}) => {
+  ({name, hash, totalPages, renderedPages, pages, products, thumbs}) => {
     const flyerId = randomUUID();
     const now = new Date().toISOString();
 
@@ -97,8 +100,8 @@ export const saveExtraction = db.transaction(
       created_at: now,
     });
 
-    const dir = join(PAGES_DIR, flyerId);
-    mkdirSync(dir, {recursive: true});
+    const pageDir = join(PAGES_DIR, flyerId);
+    mkdirSync(pageDir, {recursive: true});
     for (const p of pages) {
       stmts.insertPage.run({
         flyer_id: flyerId,
@@ -106,13 +109,21 @@ export const saveExtraction = db.transaction(
         width: p.width,
         height: p.height,
       });
-      writeFileSync(join(dir, `${p.page}.jpg`), Buffer.from(p.jpegBase64, 'base64'));
+      writeFileSync(join(pageDir, `${p.page}.jpg`), Buffer.from(p.jpegBase64, 'base64'));
     }
+
+    const thumbDir = join(THUMBS_DIR, flyerId);
+    mkdirSync(thumbDir, {recursive: true});
 
     let i = 0;
     for (const pr of products) {
+      const id = `${flyerId}-${pr.page}-${i}`;
+      const thumb = thumbs?.get(i);
+      if (thumb) {
+        writeFileSync(join(thumbDir, `${id}.jpg`), thumb);
+      }
       stmts.insertProduct.run({
-        id: `${flyerId}-${pr.page}-${i++}`,
+        id,
         flyer_id: flyerId,
         page: pr.page,
         name: pr.name || 'Unnamed item',
@@ -121,8 +132,10 @@ export const saveExtraction = db.transaction(
         info: pr.info || null,
         box: pr.box ? JSON.stringify(pr.box) : null,
         confidence: pr.confidence ?? null,
+        has_thumb: thumb ? 1 : 0,
         created_at: now,
       });
+      i++;
     }
 
     return {flyerId, savedProducts: products.length};
@@ -146,10 +159,10 @@ function whereFor(q) {
 
 /**
  * Paginated + text search over all stored products, newest first.
- * `pathForPage(flyerId, page)` builds the image URL for a page.
+ * `baseUrl` is `http://<host>` — used to build page + thumbnail URLs.
  * Returns { products, pages, total, hasMore }.
  */
-export function searchProducts({q = '', limit = 20, offset = 0}, pathForPage) {
+export function searchProducts({q = '', limit = 20, offset = 0}, baseUrl) {
   const lim = Math.max(1, Math.min(100, Number(limit) || 20));
   const off = Math.max(0, Number(offset) || 0);
   const {clause, params} = whereFor(q);
@@ -160,7 +173,7 @@ export function searchProducts({q = '', limit = 20, offset = 0}, pathForPage) {
 
   const rows = db
     .prepare(
-      `SELECT id, flyer_id, page, name, price, price_value, info, box, confidence
+      `SELECT id, flyer_id, page, name, price, price_value, info, box, confidence, has_thumb
          FROM products ${clause}
         ORDER BY created_at DESC, rowid DESC
         LIMIT ? OFFSET ?`,
@@ -177,6 +190,9 @@ export function searchProducts({q = '', limit = 20, offset = 0}, pathForPage) {
     info: r.info || '',
     box: r.box ? JSON.parse(r.box) : null,
     confidence: r.confidence,
+    thumb: r.has_thumb
+      ? `${baseUrl}/thumbs/${r.flyer_id}/${r.id}.jpg`
+      : null,
   }));
 
   // The distinct pages this result set references, with their pixel size + URL.
@@ -195,7 +211,7 @@ export function searchProducts({q = '', limit = 20, offset = 0}, pathForPage) {
         page: p.page,
         width: dims.width,
         height: dims.height,
-        image: pathForPage(p.flyerId, p.page),
+        image: `${baseUrl}/pages/${p.flyerId}/${p.page}.jpg`,
       });
     }
   }

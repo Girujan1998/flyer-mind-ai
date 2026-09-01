@@ -186,10 +186,13 @@ function SearchScreen(): React.JSX.Element {
           columnWrapperStyle={styles.column}
           contentContainerStyle={styles.grid}
           keyboardShouldPersistTaps="handled"
+          removeClippedSubviews
+          initialNumToRender={8}
+          maxToRenderPerBatch={8}
+          windowSize={7}
           renderItem={({item}) => (
             <ProductCard
               product={item}
-              page={pages.get(pageKey(item.flyerId, item.page))}
               width={COLUMN_WIDTH}
               onPress={setSelected}
             />

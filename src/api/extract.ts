@@ -24,6 +24,8 @@ export type Product = {
   box: GeminiBox | null;
   /** Model's 0-100 self-rated confidence; null if not reported. */
   confidence: number | null;
+  /** URL of a small pre-cropped thumbnail of this product; null if none. */
+  thumb: string | null;
 };
 
 export type FlyerPage = {

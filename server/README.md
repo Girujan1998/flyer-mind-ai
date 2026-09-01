@@ -40,10 +40,16 @@ and any `truncated` / `FAILED` warnings. `logs/` is gitignored.
 
 ## Storage
 
-Extracted products are **saved to SQLite** (`data/flyer.db`, better-sqlite3) and
-rendered page JPEGs to `data/pages/<flyerId>/<page>.jpg`. `data/` is gitignored;
-delete it to start fresh. Re-uploading the exact same PDF (matched by sha256) is
-not re-extracted — it returns the stored summary.
+Extracted products are **saved to SQLite** (`data/flyer.db`, better-sqlite3).
+Images on disk under `data/`:
+
+- `pages/<flyerId>/<page>.jpg` — the full rendered page (for the source-page view)
+- `thumbs/<flyerId>/<productId>.jpg` — a small crop of each product's bounding
+  box (mupdf pixmap warp), so the product list shows tiny images instead of
+  loading + upscaling the whole page per card
+
+`data/` is gitignored; delete it to start fresh. Re-uploading the exact same PDF
+(matched by sha256) is not re-extracted — it returns the stored summary.
 
 ## API
 
@@ -69,7 +75,8 @@ newest first.
 {
   "products": [
     { "id": "…", "flyerId": "…", "page": 1, "name": "Corn", "price": "34¢",
-      "priceValue": 0.34, "info": "…", "box": [230,60,360,300], "confidence": 95 }
+      "priceValue": 0.34, "info": "…", "box": [230,60,360,300], "confidence": 95,
+      "thumb": "http://<host>/thumbs/<flyerId>/<id>.jpg" }
   ],
   "pages": [
     { "flyerId": "…", "page": 1, "width": 1592, "height": 2060,
@@ -80,11 +87,12 @@ newest first.
 ```
 
 `box` is `[ymin, xmin, ymax, xmax]`, each 0–1000, normalized to that page's
-`width`/`height`. `pages` holds the distinct pages referenced by this result set.
+`width`/`height`. `thumb` is the product's crop (or `null`); `pages` holds the
+distinct full pages referenced by this result set (for the source-page view).
 
-### `GET /pages/<flyerId>/<page>.jpg`
+### `GET /pages/<flyerId>/<page>.jpg` · `GET /thumbs/<flyerId>/<id>.jpg`
 
-The rendered page image (static file).
+The rendered page image and per-product crop (static files).
 
 ### `GET /health`
 

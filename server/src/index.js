@@ -10,6 +10,7 @@ import multer from 'multer';
 
 import {
   PAGES_DIR,
+  THUMBS_DIR,
   findFlyerByHash,
   productCountForFlyer,
   saveExtraction,
@@ -18,6 +19,7 @@ import {
 } from './db.js';
 import {extractFlyer} from './gemini.js';
 import {renderPdf} from './pdf.js';
+import {renderThumbs} from './thumbs.js';
 
 /** First non-internal IPv4 address — the one a phone on the same Wi-Fi uses. */
 function lanAddress() {
@@ -58,11 +60,12 @@ app.use((req, res, next) => {
   next();
 });
 
-// Rendered page images: /pages/<flyerId>/<page>.jpg
-app.use('/pages', express.static(PAGES_DIR, {immutable: true, maxAge: '30d'}));
+// Page images + per-product crop thumbnails, served straight off disk.
+const staticOpts = {immutable: true, maxAge: '30d'};
+app.use('/pages', express.static(PAGES_DIR, staticOpts));
+app.use('/thumbs', express.static(THUMBS_DIR, staticOpts));
 
-const pageUrl = req => (flyerId, page) =>
-  `${req.protocol}://${req.get('host')}/pages/${flyerId}/${page}.jpg`;
+const baseUrlOf = req => `${req.protocol}://${req.get('host')}`;
 
 app.get('/health', (_req, res) => {
   res.json({
@@ -130,6 +133,13 @@ app.post('/flyers/extract', upload.single('file'), async (req, res) => {
       rendered.pages.map(p => ({page: p.page, jpeg: p.jpegBase64})),
     );
 
+    let thumbs;
+    try {
+      thumbs = renderThumbs(req.file.buffer, products, {maxPages});
+    } catch (err) {
+      console.warn(`[thumbs] skipped: ${err.message}`);
+    }
+
     const {flyerId, savedProducts} = saveExtraction({
       name: req.file.originalname || 'flyer.pdf',
       hash,
@@ -137,6 +147,7 @@ app.post('/flyers/extract', upload.single('file'), async (req, res) => {
       renderedPages: rendered.renderedPages,
       pages: rendered.pages,
       products,
+      thumbs,
     });
 
     console.log(
@@ -171,7 +182,7 @@ app.get('/products', (req, res) => {
   try {
     const result = searchProducts(
       {q: req.query.q, limit: req.query.limit, offset: req.query.offset},
-      pageUrl(req),
+      baseUrlOf(req),
     );
     res.json(result);
   } catch (err) {

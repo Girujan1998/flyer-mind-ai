@@ -1,28 +1,21 @@
 import React from 'react';
-import {Pressable, StyleSheet, Text, View} from 'react-native';
+import {Image, Pressable, StyleSheet, Text, View} from 'react-native';
 
-import {FlyerPage, Product} from '../api/extract';
+import {Product} from '../api/extract';
 import {colors, radius, spacing} from '../theme';
-import CroppedFlyerImage from './CroppedFlyerImage';
 
 const THUMB_HEIGHT = 116;
-
-type Props = {
-  product: Product;
-  page: FlyerPage | undefined;
-  width: number;
-  onPress: (product: Product) => void;
-};
 
 /** Below this the model isn't sure it read the tile right — flag for review. */
 const LOW_CONFIDENCE = 55;
 
-function ProductCard({
-  product,
-  page,
-  width,
-  onPress,
-}: Props): React.JSX.Element {
+type Props = {
+  product: Product;
+  width: number;
+  onPress: (product: Product) => void;
+};
+
+function ProductCard({product, width, onPress}: Props): React.JSX.Element {
   const lowConfidence =
     product.confidence != null && product.confidence < LOW_CONFIDENCE;
 
@@ -32,12 +25,11 @@ function ProductCard({
       onPress={() => onPress(product)}
       style={({pressed}) => [styles.card, {width}, pressed && styles.pressed]}>
       <View style={styles.thumb}>
-        {page ? (
-          <CroppedFlyerImage
-            page={page}
-            box={product.box}
-            width={width - 2}
-            height={THUMB_HEIGHT}
+        {product.thumb ? (
+          <Image
+            source={{uri: product.thumb}}
+            style={styles.thumbImage}
+            resizeMode="cover"
           />
         ) : (
           <Text style={styles.noImage}>no image</Text>
@@ -85,6 +77,7 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     backgroundColor: '#fff',
   },
+  thumbImage: {width: '100%', height: '100%'},
   noImage: {color: colors.textMuted, fontSize: 12},
   badge: {
     position: 'absolute',
