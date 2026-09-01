@@ -18,9 +18,25 @@ npm run dev                    # http://localhost:3001, restarts on change
 Set `GEMINI_API_KEY=MOCK` in `.env` to return canned products without a key —
 useful for checking the render → upload → grid flow.
 
-Point the app at it: in the repo root, `EXPO_PUBLIC_API_BASE_URL=http://localhost:3001`
-(this is the default in `app.json`; the iOS simulator can reach `localhost`, a
-physical device needs your machine's LAN IP).
+On startup it prints the LAN URL and the exact `src/config.ts` line to set so a
+phone on the same Wi-Fi can reach it.
+
+## Watching logs while testing on a phone
+
+Every run appends to `logs/server.log` (as well as stdout). While the app runs
+on your device:
+
+```bash
+# terminal 1 — the server
+cd server && npm start          # or `npm run dev`
+
+# terminal 2 — follow the log
+cd server && npm run logs
+```
+
+You'll see one `[req] <phone-ip> POST /flyers/extract 200 41000ms` line per
+upload, then the per-page `[gemini] pages N …` breakdown, a `[gemini] TOTAL`,
+and any `truncated` / `FAILED` warnings. `logs/` is gitignored.
 
 ## API
 

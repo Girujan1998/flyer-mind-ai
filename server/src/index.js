@@ -1,4 +1,5 @@
 import './loadEnv.js';
+import './logger.js';
 
 import {networkInterfaces} from 'node:os';
 
@@ -31,6 +32,22 @@ const upload = multer({
 
 const app = express();
 app.use(cors());
+
+// One line per request — shows the phone's traffic hitting the server live.
+app.use((req, res, next) => {
+  const t0 = Date.now();
+  const ip = String(
+    req.headers['x-forwarded-for'] || req.socket.remoteAddress || '',
+  ).replace('::ffff:', '');
+  res.on('finish', () => {
+    console.log(
+      `[req] ${ip}  ${req.method} ${req.originalUrl}  ${res.statusCode}  ${
+        Date.now() - t0
+      }ms`,
+    );
+  });
+  next();
+});
 
 app.get('/health', (_req, res) => {
   res.json({
