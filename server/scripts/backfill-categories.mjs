@@ -2,7 +2,7 @@
 // re-rasterising or re-running vision. Text-only Gemini calls over product
 // names, in batches, until every row has a category.
 //
-//   node scripts/backfill-categories.mjs [--batch 60] [--dry]
+//   node scripts/backfill-categories.mjs [--batch 40] [--dry]
 
 import '../src/loadEnv.js';
 
@@ -12,14 +12,15 @@ import {categorizeProducts} from '../src/gemini.js';
 const args = process.argv.slice(2);
 const dry = args.includes('--dry');
 const batchArg = args.indexOf('--batch');
-const BATCH = batchArg >= 0 ? Math.max(1, +args[batchArg + 1] || 60) : 60;
+const START_BATCH = batchArg >= 0 ? Math.max(1, +args[batchArg + 1] || 40) : 40;
 
 let done = 0;
 let calls = 0;
 let tokens = 0;
+let size = START_BATCH;
 
 for (;;) {
-  const rows = productsMissingCategory(BATCH);
+  const rows = productsMissingCategory(size);
   if (!rows.length) {
     break;
   }
@@ -30,7 +31,7 @@ for (;;) {
     info: r.info || '',
   }));
 
-  const {result, usage} = await categorizeProducts(items);
+  const {result, usage, finishReason} = await categorizeProducts(items);
   calls++;
   tokens += usage?.totalTokens || 0;
 
@@ -48,7 +49,8 @@ for (;;) {
     .map(u => `${u.category}${u.tags.length ? ` [${u.tags.join(', ')}]` : ''}`)
     .join('  ·  ');
   console.log(
-    `batch ${calls}: ${updates.length}/${rows.length} categorised` +
+    `batch ${calls} (size ${rows.length}): ${updates.length} categorised` +
+      (finishReason && finishReason !== 'STOP' ? ` [${finishReason}]` : '') +
       (sample ? `  — ${sample}` : ''),
   );
 
@@ -57,15 +59,25 @@ for (;;) {
   }
   done += updates.length;
 
-  if (updates.length === 0) {
-    console.warn(
-      'no rows categorised this batch — stopping so we do not loop forever',
-    );
-    break;
-  }
   if (dry) {
     console.log('(--dry: not written; stopping after one batch)');
     break;
+  }
+
+  if (updates.length === 0) {
+    // The model gave us nothing usable for this slice. Shrink and retry;
+    // give up only once we are already down to a tiny batch.
+    if (size <= 5) {
+      console.warn(
+        `stuck on ${rows.length} row(s) even at size ${size} — stopping. ` +
+          'Re-run later to retry them.',
+      );
+      break;
+    }
+    size = Math.max(5, Math.floor(size / 3));
+    console.warn(`  → retrying with smaller batches (size ${size})`);
+  } else if (updates.length === rows.length && size < START_BATCH) {
+    size = Math.min(START_BATCH, size * 2); // recovered — grow back
   }
 }
 

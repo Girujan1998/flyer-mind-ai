@@ -761,31 +761,73 @@ export async function categorizeProducts(items) {
         temperature: 0,
         responseMimeType: 'application/json',
         responseSchema: CATEGORY_SCHEMA,
-        thinkingConfig: {thinkingBudget: 0},
-        maxOutputTokens: Math.min(65536, 140 * items.length + 2000),
+        thinkingConfig: {thinkingBudget: 256},
+        maxOutputTokens: Math.min(65536, 260 * items.length + 4000),
       },
     },
     apiKey,
     model,
   );
 
-  const text = json.candidates?.[0]?.content?.parts?.[0]?.text;
+  const candidate = json.candidates?.[0];
+  const text = candidate?.content?.parts?.[0]?.text ?? '';
+  const finishReason = candidate?.finishReason;
+
   const result = new Map();
-  try {
-    const arr = JSON.parse(text);
-    if (Array.isArray(arr)) {
-      for (const r of arr) {
-        const ref = Number(r.ref);
-        if (!Number.isInteger(ref)) {
-          continue;
-        }
-        const category = cleanCategory(r.category);
-        result.set(ref, {category, tags: cleanTags(r.tags, category)});
-      }
+  for (const r of parseObjectArray(text)) {
+    const ref = Number(r.ref);
+    if (!Number.isInteger(ref)) {
+      continue;
     }
-  } catch {
-    // caller keeps whatever it already has
+    const category = cleanCategory(r.category);
+    if (!category) {
+      continue;
+    }
+    result.set(ref, {category, tags: cleanTags(r.tags, category)});
   }
 
-  return {result, usage: readUsage(json)};
+  return {result, usage: readUsage(json), finishReason};
+}
+
+// Parse a JSON array of flat objects, salvaging every complete object if the
+// response was truncated (same trick parseProductArray uses for products).
+function parseObjectArray(text) {
+  try {
+    const v = JSON.parse(text);
+    if (Array.isArray(v)) {
+      return v;
+    }
+  } catch {
+    // fall through to salvage
+  }
+  const out = [];
+  let depth = 0;
+  let inStr = false;
+  let esc = false;
+  let start = -1;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (inStr) {
+      if (esc) esc = false;
+      else if (c === '\\') esc = true;
+      else if (c === '"') inStr = false;
+      continue;
+    }
+    if (c === '"') inStr = true;
+    else if (c === '{') {
+      if (depth === 0) start = i;
+      depth++;
+    } else if (c === '}') {
+      depth--;
+      if (depth === 0 && start >= 0) {
+        try {
+          out.push(JSON.parse(text.slice(start, i + 1)));
+        } catch {
+          /* skip */
+        }
+        start = -1;
+      }
+    }
+  }
+  return out;
 }
