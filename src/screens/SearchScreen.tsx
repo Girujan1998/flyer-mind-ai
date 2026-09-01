@@ -18,6 +18,7 @@ import {
   searchProducts,
 } from '../api/extract';
 import ProductCard from '../components/ProductCard';
+import ProductInfoModal from '../components/ProductInfoModal';
 import SourcePageModal from '../components/SourcePageModal';
 import {colors, radius, spacing} from '../theme';
 
@@ -38,7 +39,10 @@ function SearchScreen(): React.JSX.Element {
   const [loading, setLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [selected, setSelected] = useState<Product | null>(null);
+  // Tapping a card opens the info modal; "View in Flyer" from there opens the
+  // source-page modal.
+  const [infoProduct, setInfoProduct] = useState<Product | null>(null);
+  const [flyerProduct, setFlyerProduct] = useState<Product | null>(null);
 
   // debounce the search box
   useEffect(() => {
@@ -194,21 +198,32 @@ function SearchScreen(): React.JSX.Element {
             <ProductCard
               product={item}
               width={COLUMN_WIDTH}
-              onPress={setSelected}
+              onPress={setInfoProduct}
             />
           )}
           ListFooterComponent={renderFooter()}
         />
       )}
 
+      <ProductInfoModal
+        product={infoProduct}
+        onClose={() => setInfoProduct(null)}
+        onViewInFlyer={product => {
+          // Let the info sheet finish dismissing before the next modal presents
+          // — stacked Modal transitions glitch on iOS otherwise.
+          setInfoProduct(null);
+          setTimeout(() => setFlyerProduct(product), 260);
+        }}
+      />
+
       <SourcePageModal
-        product={selected}
+        product={flyerProduct}
         page={
-          selected
-            ? pages.get(pageKey(selected.flyerId, selected.page))
+          flyerProduct
+            ? pages.get(pageKey(flyerProduct.flyerId, flyerProduct.page))
             : undefined
         }
-        onClose={() => setSelected(null)}
+        onClose={() => setFlyerProduct(null)}
       />
     </View>
   );

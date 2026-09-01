@@ -7,6 +7,8 @@ export const colors = {
   primary: '#4285f4',
   primaryTint: 'rgba(66, 133, 244, 0.12)',
   danger: '#d93025',
+  success: '#1e8e3e',
+  successTint: 'rgba(30, 142, 62, 0.12)',
 };
 
 export const spacing = {

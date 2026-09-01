@@ -122,26 +122,51 @@ export function searchProducts(params: {
   return api<SearchResult>(`/products?${qs}`);
 }
 
+const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
+
+/** Today as a local "YYYY-MM-DD" — comparable directly against flyer dates. */
+export function todayIso(): string {
+  const d = new Date();
+  const p = (n: number) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+}
+
+/** True when today falls within [from, to], both days included. */
+export function isFlyerValid(from: string, to: string): boolean {
+  if (!ISO_DATE.test(from) || !ISO_DATE.test(to)) {
+    return false;
+  }
+  const t = todayIso();
+  return from <= t && t <= to;
+}
+
+/** "Sep 2" — short month + day, or '' if not a usable "YYYY-MM-DD". */
+export function formatShortDate(iso: string): string {
+  if (!ISO_DATE.test(iso)) {
+    return '';
+  }
+  return new Date(`${iso}T00:00:00`).toLocaleDateString('en-US', {
+    month: 'short',
+    day: 'numeric',
+  });
+}
+
 /**
  * Format a flyer validity window for display, e.g. "Aug 27 – Sep 2, 2026".
  * Returns '' if neither date is a usable "YYYY-MM-DD".
  */
 export function formatValidity(from: string, to: string): string {
-  const parse = (s: string) =>
-    /^\d{4}-\d{2}-\d{2}$/.test(s) ? new Date(`${s}T00:00:00`) : null;
-  const a = parse(from);
-  const b = parse(to);
+  const a = ISO_DATE.test(from) ? new Date(`${from}T00:00:00`) : null;
+  const b = ISO_DATE.test(to) ? new Date(`${to}T00:00:00`) : null;
   if (!a && !b) {
     return '';
   }
   const md = (d: Date) =>
     d.toLocaleDateString('en-US', {month: 'short', day: 'numeric'});
   if (a && b) {
-    const sameDay = from === to;
-    if (sameDay) {
-      return `${md(a)}, ${a.getFullYear()}`;
-    }
-    return `${md(a)} – ${md(b)}, ${b.getFullYear()}`;
+    return from === to
+      ? `${md(a)}, ${a.getFullYear()}`
+      : `${md(a)} – ${md(b)}, ${b.getFullYear()}`;
   }
   const one = (a ?? b) as Date;
   return `${md(one)}, ${one.getFullYear()}`;
