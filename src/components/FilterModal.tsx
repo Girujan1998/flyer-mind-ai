@@ -88,13 +88,18 @@ function FilterModal({
     onToggle: (v: string) => void,
     labelFor: (v: string) => string,
   ) => {
-    // keep a selected option visible even if it now has 0 matches
+    // keep a selected option visible even if it now has 0 matches, and show the
+    // whole list alphabetically by its display label
     const rows = [
       ...facetList,
       ...selected
         .filter(s => !facetList.some(f => f.value === s))
         .map(s => ({value: s, count: 0})),
-    ];
+    ].sort((a, b) =>
+      labelFor(a.value).localeCompare(labelFor(b.value), undefined, {
+        sensitivity: 'base',
+      }),
+    );
     if (rows.length === 0) {
       return null;
     }

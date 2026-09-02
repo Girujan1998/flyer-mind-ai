@@ -456,7 +456,7 @@ export function filterFacets({q = '', departments, stores, statuses} = {}) {
     .prepare(
       `SELECT p.department AS value, COUNT(*) AS n ${FROM}
         ${andWhere(dw.clause, "p.department IS NOT NULL AND p.department <> ''")}
-        GROUP BY p.department ORDER BY n DESC`,
+        GROUP BY p.department ORDER BY value COLLATE NOCASE`,
     )
     .all(...dw.params);
 
@@ -466,7 +466,7 @@ export function filterFacets({q = '', departments, stores, statuses} = {}) {
     .prepare(
       `SELECT f.store AS value, COUNT(*) AS n ${FROM}
         ${andWhere(sw.clause, "f.store IS NOT NULL AND f.store <> ''")}
-        GROUP BY f.store ORDER BY n DESC`,
+        GROUP BY f.store ORDER BY value COLLATE NOCASE`,
     )
     .all(...sw.params);
 
@@ -491,10 +491,11 @@ export function filterFacets({q = '', departments, stores, statuses} = {}) {
   return {
     departments: deptRows.map(r => ({value: r.value, count: r.n})),
     stores: storeRows.map(r => ({value: r.value, count: r.n})),
-    statuses: STATUSES.filter(s => byStatus.get(s)).map(s => ({
-      value: s,
-      count: byStatus.get(s),
-    })),
+    // every state that has a match, alphabetically
+    statuses: [...STATUSES]
+      .sort()
+      .filter(s => byStatus.get(s))
+      .map(s => ({value: s, count: byStatus.get(s)})),
     total,
   };
 }
