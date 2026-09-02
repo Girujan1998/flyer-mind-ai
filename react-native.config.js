@@ -1,6 +1,6 @@
 /**
  * Font files in assets/fonts are linked into the native projects by
- * `npx react-native-asset` (see assets/fonts/README.md).
+ * `npx react-native-asset` (see assets/FONTS.md).
  */
 module.exports = {
   project: {

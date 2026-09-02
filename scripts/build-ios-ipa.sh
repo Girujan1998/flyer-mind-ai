@@ -35,7 +35,8 @@ APP="$DERIVED/Build/Products/Release-iphoneos/${SCHEME}.app"
 [ -d "$APP" ] || { echo "no .app at $APP" >&2; exit 1; }
 
 echo "==> packaging unsigned .ipa"
-rm -rf "$OUT/Payload" && mkdir -p "$OUT/Payload"
+rm -rf "$OUT/Payload" "$OUT/${SCHEME}-unsigned.ipa"
+mkdir -p "$OUT/Payload"
 cp -R "$APP" "$OUT/Payload/"
 ( cd "$OUT" && zip -qry "${SCHEME}-unsigned.ipa" Payload && rm -rf Payload )
 

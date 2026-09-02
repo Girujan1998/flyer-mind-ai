@@ -1,0 +1,29 @@
+{
+  "migIndex": 1,
+  "data": [
+    {
+      "path": "assets/fonts/BricolageGrotesque-Bold.ttf",
+      "sha1": "b2aedef46f4671362d339ddbaeca111c7569b7b6"
+    },
+    {
+      "path": "assets/fonts/BricolageGrotesque-SemiBold.ttf",
+      "sha1": "7e6ee4c288f2bfbc7b9ed02ea12b00159c1d81f5"
+    },
+    {
+      "path": "assets/fonts/HankenGrotesk-Bold.ttf",
+      "sha1": "b8afdae7093b3f601e14753eeea7e025d94ae2e1"
+    },
+    {
+      "path": "assets/fonts/HankenGrotesk-Medium.ttf",
+      "sha1": "eed074cd0621132f6c524cdab636df8ae619671b"
+    },
+    {
+      "path": "assets/fonts/HankenGrotesk-Regular.ttf",
+      "sha1": "cc1950817ead1ba9642a34b638304bb30f7b0e54"
+    },
+    {
+      "path": "assets/fonts/HankenGrotesk-SemiBold.ttf",
+      "sha1": "878e1c7708ddcf131425ed1d5a0aea535911fd77"
+    }
+  ]
+}

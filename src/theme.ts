@@ -120,7 +120,7 @@ export const radius = {
  * config + `npx react-native-asset` + rebuild). Until then every `fonts.*` is
  * `undefined`, so components fall back to the system font via `fontWeight`.
  */
-export const FONTS_BUNDLED = false;
+export const FONTS_BUNDLED = true;
 
 const family = (name: string): string | undefined =>
   FONTS_BUNDLED ? name : undefined;
