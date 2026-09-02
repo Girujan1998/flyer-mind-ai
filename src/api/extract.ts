@@ -128,6 +128,17 @@ export function countActiveFilters(f: ProductFilters): number {
   return f.departments.length + f.stores.length + f.statuses.length;
 }
 
+// RN's URLSearchParams polyfill has no `.set()`, so build the string by hand.
+function filtersToQuery(f: ProductFilters): string[] {
+  const csv = (key: string, vals: string[]) =>
+    vals.length ? `${key}=${vals.map(encodeURIComponent).join(',')}` : '';
+  return [
+    csv('department', f.departments),
+    csv('store', f.stores),
+    csv('status', f.statuses),
+  ];
+}
+
 /** Paginated + text search over every stored product, newest first. */
 export function searchProducts(params: {
   q?: string;
@@ -136,16 +147,11 @@ export function searchProducts(params: {
   offset?: number;
 }): Promise<SearchResult> {
   const f = params.filters ?? EMPTY_FILTERS;
-  const csv = (key: string, vals: string[]) =>
-    vals.length ? `${key}=${vals.map(encodeURIComponent).join(',')}` : '';
-  // RN's URLSearchParams polyfill has no `.set()`, so build the string by hand.
   const qs = [
     `limit=${params.limit ?? 20}`,
     `offset=${params.offset ?? 0}`,
     params.q ? `q=${encodeURIComponent(params.q)}` : '',
-    csv('department', f.departments),
-    csv('store', f.stores),
-    csv('status', f.statuses),
+    ...filtersToQuery(f),
   ]
     .filter(Boolean)
     .join('&');
@@ -159,11 +165,24 @@ export type FilterFacets = {
   departments: Facet[];
   stores: Facet[];
   statuses: Facet[];
+  /** How many products the whole current selection returns. */
+  total: number;
 };
 
-/** Everything the filter modal offers — omits states no product is in. */
-export function fetchFilterFacets(): Promise<FilterFacets> {
-  return api<FilterFacets>('/filters');
+/**
+ * Options for the filter modal. Counts are faceted against `applied` (and `q`):
+ * each list reflects the other sections' picks, so an untouched section is never
+ * a constraint and its own picks never zero its rows. Pass nothing for the
+ * unfiltered totals.
+ */
+export function fetchFilterFacets(
+  applied: ProductFilters = EMPTY_FILTERS,
+  q = '',
+): Promise<FilterFacets> {
+  const qs = [q ? `q=${encodeURIComponent(q)}` : '', ...filtersToQuery(applied)]
+    .filter(Boolean)
+    .join('&');
+  return api<FilterFacets>(`/filters${qs ? `?${qs}` : ''}`);
 }
 
 const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;

@@ -238,9 +238,16 @@ app.get('/departments', (_req, res) => {
  * GET /filters -> { departments, stores, statuses }, each [{ value, count }].
  * Feeds the Search filter modal. `statuses` omits states no product is in.
  */
-app.get('/filters', (_req, res) => {
+app.get('/filters', (req, res) => {
   try {
-    res.json(filterFacets());
+    res.json(
+      filterFacets({
+        q: req.query.q,
+        departments: req.query.department,
+        stores: req.query.store,
+        statuses: req.query.status,
+      }),
+    );
   } catch (err) {
     console.error('[filters] failed:', err);
     res.status(500).json({error: err?.message || 'Query failed'});

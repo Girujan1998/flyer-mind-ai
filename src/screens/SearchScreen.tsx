@@ -33,7 +33,12 @@ const GAP = spacing.sm;
 const COLUMN_WIDTH =
   (Dimensions.get('window').width - spacing.md * 2 - GAP) / 2;
 
-const NO_FACETS: FilterFacets = {departments: [], stores: [], statuses: []};
+const NO_FACETS: FilterFacets = {
+  departments: [],
+  stores: [],
+  statuses: [],
+  total: 0,
+};
 
 function SearchScreen(): React.JSX.Element {
   const [query, setQuery] = useState('');
@@ -279,6 +284,7 @@ function SearchScreen(): React.JSX.Element {
       <FilterModal
         visible={filterOpen}
         facets={facets}
+        query={debounced}
         value={filters}
         onApply={next => {
           setFilters(next);

@@ -434,43 +434,67 @@ export function totalProducts() {
   return stmts.countProducts.get().n;
 }
 
+const andWhere = (clause, extra) =>
+  clause ? `${clause} AND ${extra}` : `WHERE ${extra}`;
+
 /**
- * Everything the Search filter modal needs, each list `[{ value, count }]`:
- *   { departments, stores, statuses }
- * `statuses` only lists a state that some product is actually in right now.
+ * Options for the Search filter modal, each list `[{ value, count }]`, plus the
+ * `total` products the whole selection would return.
+ *
+ * Counts are faceted: each section's numbers reflect the OTHER sections'
+ * selections but not its own, so unpicking a section always widens its options
+ * and picking within a section never zeroes its own rows. An empty section is
+ * simply no constraint.
  */
-export function filterFacets() {
+export function filterFacets({q = '', departments, stores, statuses} = {}) {
   const today = todayIso();
+  const FROM = 'FROM products p JOIN flyers f ON f.id = p.flyer_id';
 
-  const departments = stmts.departmentCounts
-    .all()
-    .map(r => ({value: r.department, count: r.n}));
-
-  const stores = db
+  // departments list — every filter except departments
+  const dw = buildWhere({q, stores, statuses}, today);
+  const deptRows = db
     .prepare(
-      `SELECT f.store AS value, COUNT(*) AS n
-         FROM products p JOIN flyers f ON f.id = p.flyer_id
-        WHERE f.store IS NOT NULL AND f.store <> ''
-        GROUP BY f.store
-        ORDER BY n DESC`,
+      `SELECT p.department AS value, COUNT(*) AS n ${FROM}
+        ${andWhere(dw.clause, "p.department IS NOT NULL AND p.department <> ''")}
+        GROUP BY p.department ORDER BY n DESC`,
     )
-    .all()
-    .map(r => ({value: r.value, count: r.n}));
+    .all(...dw.params);
 
+  // stores list — every filter except stores
+  const sw = buildWhere({q, departments, statuses}, today);
+  const storeRows = db
+    .prepare(
+      `SELECT f.store AS value, COUNT(*) AS n ${FROM}
+        ${andWhere(sw.clause, "f.store IS NOT NULL AND f.store <> ''")}
+        GROUP BY f.store ORDER BY n DESC`,
+    )
+    .all(...sw.params);
+
+  // statuses list — every filter except statuses
+  const tw = buildWhere({q, departments, stores}, today);
   const byStatus = new Map(
     db
       .prepare(
-        `SELECT ${STATUS_CASE} AS status, COUNT(*) AS n
-           FROM products p JOIN flyers f ON f.id = p.flyer_id
-          GROUP BY status`,
+        `SELECT ${STATUS_CASE} AS value, COUNT(*) AS n ${FROM} ${tw.clause}
+          GROUP BY value`,
       )
-      .all(today, today)
-      .map(r => [r.status, r.n]),
+      .all(today, today, ...tw.params)
+      .map(r => [r.value, r.n]),
   );
-  const statuses = STATUSES.filter(s => byStatus.get(s)).map(s => ({
-    value: s,
-    count: byStatus.get(s),
-  }));
 
-  return {departments, stores, statuses};
+  // total — the whole selection
+  const all = buildWhere({q, departments, stores, statuses}, today);
+  const total = db
+    .prepare(`SELECT COUNT(*) AS n ${FROM} ${all.clause}`)
+    .get(...all.params).n;
+
+  return {
+    departments: deptRows.map(r => ({value: r.value, count: r.n})),
+    stores: storeRows.map(r => ({value: r.value, count: r.n})),
+    statuses: STATUSES.filter(s => byStatus.get(s)).map(s => ({
+      value: s,
+      count: byStatus.get(s),
+    })),
+    total,
+  };
 }

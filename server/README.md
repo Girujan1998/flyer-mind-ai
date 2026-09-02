@@ -143,19 +143,24 @@ match the product's **name, info, category, or tags**. `department`, `store` and
 `width`/`height`. `thumb` is the product's crop (or `null`); `pages` holds the
 distinct full pages referenced by this result set (for the source-page view).
 
-### `GET /filters`
+### `GET /filters?q=&department=&store=&status=`
 
-Everything the app's filter modal offers, each list `[{ value, count }]`:
+Options for the app's filter modal, each list `[{ value, count }]`, plus the
+`total` the whole selection returns:
 
 ```jsonc
 {
-  "departments": [{ "value": "pantry", "count": 80 }, …],
-  "stores":      [{ "value": "Walmart", "count": 432 }, …],
-  "statuses":    [{ "value": "valid", "count": 294 }, { "value": "expired", "count": 432 }]
+  "departments": [{ "value": "pantry", "count": 47 }, …],
+  "stores":      [{ "value": "Food Basics", "count": 294 }],
+  "statuses":    [{ "value": "valid", "count": 294 }, { "value": "expired", "count": 432 }],
+  "total": 294
 }
 ```
 
-`statuses` omits any state no product is currently in.
+Takes the same filter params as `/products`. Counts are **faceted**: each
+section's numbers reflect the *other* sections' selections but not its own, so
+an untouched section is never a constraint and picking within a section never
+zeroes its own rows. `statuses` omits any state no matching product is in.
 
 ### `GET /departments`
 

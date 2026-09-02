@@ -1,4 +1,4 @@
-import React, {useEffect, useState} from 'react';
+import React, {useEffect, useRef, useState} from 'react';
 import {
   Modal,
   Pressable,
@@ -13,12 +13,16 @@ import {
   FilterFacets,
   ProductFilters,
   countActiveFilters,
+  fetchFilterFacets,
 } from '../api/extract';
 import {colors, radius, spacing} from '../theme';
 
 type Props = {
   visible: boolean;
+  /** Unfiltered options, shown until the live (faceted) counts arrive. */
   facets: FilterFacets;
+  /** The active search query — facet counts respect it too. */
+  query: string;
   value: ProductFilters;
   onApply: (next: ProductFilters) => void;
   onClose: () => void;
@@ -40,11 +44,13 @@ function toggle(list: string[], v: string): string[] {
 function FilterModal({
   visible,
   facets,
+  query,
   value,
   onApply,
   onClose,
 }: Props): React.JSX.Element {
   const [draft, setDraft] = useState<ProductFilters>(value);
+  const [live, setLive] = useState<FilterFacets>(facets);
 
   // reseed the draft each time the sheet opens
   useEffect(() => {
@@ -53,7 +59,27 @@ function FilterModal({
     }
   }, [visible, value]);
 
+  // faceted counts: refetch (debounced) whenever the draft or query changes
+  const reqId = useRef(0);
+  useEffect(() => {
+    if (!visible) {
+      return;
+    }
+    const id = ++reqId.current;
+    const t = setTimeout(() => {
+      fetchFilterFacets(draft, query)
+        .then(next => {
+          if (id === reqId.current) {
+            setLive(next);
+          }
+        })
+        .catch(() => {});
+    }, 220);
+    return () => clearTimeout(t);
+  }, [visible, draft, query]);
+
   const active = countActiveFilters(draft);
+  const shown = live ?? facets;
 
   const section = (
     title: string,
@@ -62,13 +88,20 @@ function FilterModal({
     onToggle: (v: string) => void,
     labelFor: (v: string) => string,
   ) => {
-    if (facetList.length === 0) {
+    // keep a selected option visible even if it now has 0 matches
+    const rows = [
+      ...facetList,
+      ...selected
+        .filter(s => !facetList.some(f => f.value === s))
+        .map(s => ({value: s, count: 0})),
+    ];
+    if (rows.length === 0) {
       return null;
     }
     return (
       <View style={styles.section}>
         <Text style={styles.sectionTitle}>{title}</Text>
-        {facetList.map(f => {
+        {rows.map(f => {
           const on = selected.includes(f.value);
           return (
             <Pressable
@@ -81,13 +114,23 @@ function FilterModal({
                 {on ? <View style={styles.tick} /> : null}
               </View>
               <Text style={styles.rowLabel}>{labelFor(f.value)}</Text>
-              <Text style={styles.rowCount}>{f.count}</Text>
+              <Text style={[styles.rowCount, f.count === 0 && styles.rowZero]}>
+                {f.count}
+              </Text>
             </Pressable>
           );
         })}
       </View>
     );
   };
+
+  const total = shown?.total ?? 0;
+  const applyText =
+    active === 0
+      ? 'Show all products'
+      : total === 0
+      ? 'No products match'
+      : `Show ${total} result${total === 1 ? '' : 's'}`;
 
   return (
     <Modal
@@ -111,19 +154,23 @@ function FilterModal({
             </Pressable>
           </View>
 
+          <Text style={styles.hint}>
+            Leave a section untouched to include everything in it.
+          </Text>
+
           <ScrollView
             style={styles.body}
             contentContainerStyle={styles.bodyContent}>
             {section(
               'Status',
-              facets.statuses,
+              shown.statuses,
               draft.statuses,
               v => setDraft(d => ({...d, statuses: toggle(d.statuses, v)})),
               v => STATUS_LABEL[v] ?? titleCase(v),
             )}
             {section(
               'Category',
-              facets.departments,
+              shown.departments,
               draft.departments,
               v =>
                 setDraft(d => ({...d, departments: toggle(d.departments, v)})),
@@ -131,7 +178,7 @@ function FilterModal({
             )}
             {section(
               'Store',
-              facets.stores,
+              shown.stores,
               draft.stores,
               v => setDraft(d => ({...d, stores: toggle(d.stores, v)})),
               v => v,
@@ -152,9 +199,7 @@ function FilterModal({
             <Pressable
               onPress={() => onApply(draft)}
               style={({pressed}) => [styles.apply, pressed && styles.applyOn]}>
-              <Text style={styles.applyText}>
-                {active > 0 ? `Apply (${active})` : 'Apply'}
-              </Text>
+              <Text style={styles.applyText}>{applyText}</Text>
             </Pressable>
           </View>
         </View>
@@ -183,8 +228,6 @@ const styles = StyleSheet.create({
     paddingHorizontal: spacing.md,
     paddingTop: spacing.md,
     paddingBottom: spacing.sm,
-    borderBottomWidth: 1,
-    borderBottomColor: colors.border,
   },
   title: {fontSize: 18, fontWeight: '700', color: colors.text},
   close: {
@@ -202,6 +245,14 @@ const styles = StyleSheet.create({
   },
   closeBarA: {transform: [{rotate: '45deg'}]},
   closeBarB: {transform: [{rotate: '-45deg'}]},
+  hint: {
+    fontSize: 12,
+    color: colors.textMuted,
+    paddingHorizontal: spacing.md,
+    paddingBottom: spacing.sm,
+    borderBottomWidth: 1,
+    borderBottomColor: colors.border,
+  },
   body: {alignSelf: 'stretch'},
   bodyContent: {padding: spacing.md, paddingBottom: spacing.lg},
   section: {marginBottom: spacing.lg},
@@ -237,6 +288,7 @@ const styles = StyleSheet.create({
     color: colors.textMuted,
     fontVariant: ['tabular-nums'],
   },
+  rowZero: {opacity: 0.4},
   footer: {
     flexDirection: 'row',
     gap: spacing.sm,
