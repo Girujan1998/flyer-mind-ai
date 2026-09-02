@@ -72,6 +72,22 @@ extra request, ~25 extra output tokens each):
 — and `GET /departments` returns `{ departments: [{ department, count }] }` for
 the app's filter chips.
 
+## On sale vs. just listed
+
+Each product also carries, from the same vision call:
+
+- **`wasPrice`** — the struck-through / "reg." price when the tile shows one
+  (`"$5.99"`), else `""`. A "was" price that isn't actually higher than the
+  current price is dropped (common misread).
+- **`promoText`** — a verbatim deal callout (`"Save $2"`, `"2 for $5"`,
+  `"Rollback"`), else `""`.
+- **`onSale`** — `true` when `wasPrice` **or** `promoText` is set. Strict: a
+  plain flyer price with no discount wording is **not** "on sale".
+
+Filter with `GET /products?sale=1`; `GET /filters` returns `saleCount`.
+Existing products predate this and are all `onSale:false` until re-extracted —
+there is no reliable text-only backfill (the was-price was never stored).
+
 Products stored before a field existed have it blank. Backfill with text-only
 passes (names only, no images, batched — run categories first):
 
@@ -120,6 +136,7 @@ match the product's **name, info, category, or tags**. `department`, `store` and
 - `store=Walmart,Food Basics` — exact store name
 - `status=valid,expired` — `valid` \| `upcoming` \| `expired` \| `unknown`,
   computed from the flyer dates vs. the server's clock
+- `sale=1` — only products with a `wasPrice` or `promoText`
 
 ```jsonc
 {
@@ -128,6 +145,7 @@ match the product's **name, info, category, or tags**. `department`, `store` and
       "priceValue": 0.34, "info": "…", "box": [230,60,360,300], "confidence": 95,
       "category": "corn", "tags": ["vegetable","produce","cob"],
       "department": "vegetables",
+      "wasPrice": "48¢", "promoText": "Save 14¢", "onSale": true,
       "store": "Food Basics", "validFrom": "2026-08-27", "validTo": "2026-09-02",
       "thumb": "http://<host>/thumbs/<flyerId>/<id>.jpg" }
   ],
@@ -153,6 +171,7 @@ Options for the app's filter modal, each list `[{ value, count }]`, plus the
   "departments": [{ "value": "pantry", "count": 47 }, …],
   "stores":      [{ "value": "Food Basics", "count": 294 }],
   "statuses":    [{ "value": "valid", "count": 294 }, { "value": "expired", "count": 432 }],
+  "saleCount": 61,
   "total": 294
 }
 ```

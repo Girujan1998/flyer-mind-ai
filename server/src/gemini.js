@@ -61,8 +61,15 @@ For each product:
 - "price": the same price formatted as text, with the decimal and any unit —
   "$29.97", "$13.96", "34¢", "$3.17/lb", "$1.97 each". Never write it as a run of
   digits with no separator.
-- "info": size / quantity / pack / promo detail printed INSIDE this tile ("375 g",
+- "info": size / quantity / pack detail printed INSIDE this tile ("375 g",
   "6 x 591 mL", "Selected varieties"). Empty string if none is inside this tile.
+- "wasPrice": ONLY if the tile shows a struck-through / "reg." / "was" regular
+  price next to the current one, put that OLD price here as text ("$5.99").
+  Empty string when there is no crossed-out price — most flyer tiles have none.
+- "promoText": the tile's explicit deal callout, copied short and verbatim —
+  "Save $2", "Save 30%", "2 for $5", "Buy 1 Get 1", "Rollback", "Clearance",
+  "Members price", "Spend $25 get 2000 points". Empty string if the tile just
+  shows a plain price with no discount wording.
 - "box": this product tile's bounding box [ymin, xmin, ymax, xmax], each 0-1000,
   normalised to THAT product's page image. It must tightly enclose ONLY this one
   product — its photo and its own text block — and not spill into the tiles
@@ -240,6 +247,8 @@ const RESPONSE_SCHEMA = {
       priceValue: {type: 'NUMBER'},
       price: {type: 'STRING'},
       info: {type: 'STRING'},
+      wasPrice: {type: 'STRING'},
+      promoText: {type: 'STRING'},
       box: {type: 'ARRAY', items: {type: 'NUMBER'}},
       confidence: {type: 'INTEGER'},
       category: {type: 'STRING'},
@@ -252,6 +261,8 @@ const RESPONSE_SCHEMA = {
       'priceValue',
       'price',
       'info',
+      'wasPrice',
+      'promoText',
       'box',
       'confidence',
       'category',
@@ -332,6 +343,37 @@ function reconcilePrice(price, priceValue) {
     return `$${raw}`;
   }
   return raw;
+}
+
+function parsePriceNumber(s) {
+  const m = String(s || '')
+    .replace(/,/g, '')
+    .match(/\d+(?:\.\d{1,2})?/);
+  return m ? parseFloat(m[0]) : null;
+}
+
+// Turn the model's wasPrice / promoText into a clean offer.
+// "on sale" is strict: only true when there's a real struck-through price or an
+// explicit discount callout — not just a plain flyer price.
+function readOffer(rawWas, rawPromo, priceValue) {
+  let wasPrice = reconcilePrice(String(rawWas || '').trim(), null);
+  const promoText = String(rawPromo || '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 60);
+
+  // Drop a "was" price that isn't actually higher than the current one — a
+  // common misread where the model swaps the regular and sale figures.
+  const wasNum = parsePriceNumber(wasPrice);
+  const nowNum =
+    typeof priceValue === 'number' && isFinite(priceValue) && priceValue > 0
+      ? priceValue
+      : null;
+  if (wasPrice && wasNum != null && nowNum != null && wasNum <= nowNum) {
+    wasPrice = '';
+  }
+
+  return {wasPrice, promoText, onSale: Boolean(wasPrice) || Boolean(promoText)};
 }
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
@@ -518,12 +560,20 @@ async function extractBatch(batch, apiKey, model) {
       typeof p.priceValue === 'number' ? p.priceValue : Number(p.priceValue);
     const confidence = Number(p.confidence);
     const category = cleanCategory(p.category);
+    const {wasPrice, promoText, onSale} = readOffer(
+      p.wasPrice,
+      p.promoText,
+      priceValue,
+    );
     return {
       page,
       name: (p.name || '').toString().trim(),
       price: reconcilePrice((p.price || '').toString().trim(), priceValue),
       priceValue: isFinite(priceValue) && priceValue > 0 ? priceValue : null,
       info: (p.info || '').toString().trim(),
+      wasPrice,
+      promoText,
+      onSale,
       box:
         Array.isArray(p.box) && p.box.length === 4 ? p.box.map(Number) : null,
       confidence: isFinite(confidence)
@@ -562,6 +612,9 @@ export async function extractFlyer(pages) {
           price: '$3.99',
           priceValue: 3.99,
           info: 'each',
+          wasPrice: '$4.99',
+          promoText: 'Save $1',
+          onSale: true,
           confidence: 92,
           category: 'snack',
           tags: ['snacks', 'chips'],
@@ -572,6 +625,9 @@ export async function extractFlyer(pages) {
           price: '$1.49',
           priceValue: 1.49,
           info: '500 g',
+          wasPrice: '',
+          promoText: '',
+          onSale: false,
           confidence: 88,
           category: 'yogurt',
           tags: ['dairy', 'greek yogurt'],
@@ -582,6 +638,9 @@ export async function extractFlyer(pages) {
           price: '$8.97',
           priceValue: 8.97,
           info: 'Selected varieties',
+          wasPrice: '',
+          promoText: '2 for $16',
+          onSale: true,
           confidence: 41,
           category: 'laundry detergent',
           tags: ['detergent', 'soap'],

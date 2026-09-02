@@ -64,6 +64,11 @@ function ProductCard({product, width, onPress}: Props): React.JSX.Element {
         <View style={styles.statusPill}>
           <FlyerStatusPill status={status} compact />
         </View>
+        {product.onSale ? (
+          <View style={styles.salePill} accessibilityLabel="On sale">
+            <Text style={styles.saleText}>SALE</Text>
+          </View>
+        ) : null}
         {lowConfidence ? (
           <View
             style={styles.badge}
@@ -79,9 +84,20 @@ function ProductCard({product, width, onPress}: Props): React.JSX.Element {
         </Text>
 
         <View style={styles.metaRow}>
-          <Text style={styles.price}>{product.price || '—'}</Text>
+          <View style={styles.priceWrap}>
+            <Text style={styles.price}>{product.price || '—'}</Text>
+            {product.wasPrice ? (
+              <Text style={styles.wasPrice}>{product.wasPrice}</Text>
+            ) : null}
+          </View>
           <Text style={styles.page}>p.{product.page}</Text>
         </View>
+
+        {product.promoText ? (
+          <Text style={styles.promo} numberOfLines={1}>
+            {product.promoText}
+          </Text>
+        ) : null}
 
         {dateLabel ? (
           <View style={styles.dateRow}>
@@ -118,6 +134,21 @@ const styles = StyleSheet.create({
   thumbImage: {width: '100%', height: '100%'},
   noImage: {color: colors.textMuted, fontSize: 12},
   statusPill: {position: 'absolute', top: 6, left: 6},
+  salePill: {
+    position: 'absolute',
+    bottom: 6,
+    left: 6,
+    paddingVertical: 2,
+    paddingHorizontal: 6,
+    borderRadius: 4,
+    backgroundColor: colors.danger,
+  },
+  saleText: {
+    color: '#fff',
+    fontSize: 10,
+    fontWeight: '800',
+    letterSpacing: 0.5,
+  },
   badge: {
     position: 'absolute',
     top: 6,
@@ -138,7 +169,19 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
     gap: 6,
   },
+  priceWrap: {
+    flexDirection: 'row',
+    alignItems: 'baseline',
+    gap: 5,
+    flexShrink: 1,
+  },
   price: {color: colors.primary, fontSize: 15, fontWeight: '700'},
+  wasPrice: {
+    color: colors.textMuted,
+    fontSize: 11,
+    textDecorationLine: 'line-through',
+  },
+  promo: {color: colors.danger, fontSize: 11, fontWeight: '700'},
   page: {color: colors.textMuted, fontSize: 11},
   dateRow: {flexDirection: 'row', alignItems: 'center', gap: 5},
   dateText: {fontSize: 11, lineHeight: 15},

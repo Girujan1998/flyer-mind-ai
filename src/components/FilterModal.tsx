@@ -166,6 +166,29 @@ function FilterModal({
           <ScrollView
             style={styles.body}
             contentContainerStyle={styles.bodyContent}>
+            <View style={styles.section}>
+              <Text style={styles.sectionTitle}>Offer</Text>
+              <Pressable
+                onPress={() => setDraft(d => ({...d, onSale: !d.onSale}))}
+                accessibilityRole="checkbox"
+                accessibilityState={{checked: draft.onSale}}
+                style={({pressed}) => [
+                  styles.row,
+                  pressed && styles.rowPressed,
+                ]}>
+                <View style={[styles.box, draft.onSale && styles.boxOn]}>
+                  {draft.onSale ? <View style={styles.tick} /> : null}
+                </View>
+                <Text style={styles.rowLabel}>On sale only</Text>
+                <Text
+                  style={[
+                    styles.rowCount,
+                    (shown.saleCount ?? 0) === 0 && styles.rowZero,
+                  ]}>
+                  {shown.saleCount ?? 0}
+                </Text>
+              </Pressable>
+            </View>
             {section(
               'Status',
               shown.statuses,

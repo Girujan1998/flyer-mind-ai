@@ -30,6 +30,12 @@ export type Product = {
   tags: string[];
   /** Coarse store aisle, e.g. "laundry", "fruit"; '' if unknown. */
   department: string;
+  /** Struck-through regular price when the tile shows one, e.g. "$5.99"; '' otherwise. */
+  wasPrice: string;
+  /** Verbatim deal callout, e.g. "Save $2", "2 for $5"; '' if none. */
+  promoText: string;
+  /** True when the tile explicitly frames this as a deal (wasPrice or promoText). */
+  onSale: boolean;
   /** URL of a small pre-cropped thumbnail of this product; null if none. */
   thumb: string | null;
   /** Store this flyer is for, e.g. "Food Basics"; '' if unknown. */
@@ -116,16 +122,24 @@ export type ProductFilters = {
   departments: string[];
   stores: string[];
   statuses: string[];
+  /** Show only products the flyer explicitly frames as a deal. */
+  onSale: boolean;
 };
 
 export const EMPTY_FILTERS: ProductFilters = {
   departments: [],
   stores: [],
   statuses: [],
+  onSale: false,
 };
 
 export function countActiveFilters(f: ProductFilters): number {
-  return f.departments.length + f.stores.length + f.statuses.length;
+  return (
+    f.departments.length +
+    f.stores.length +
+    f.statuses.length +
+    (f.onSale ? 1 : 0)
+  );
 }
 
 // RN's URLSearchParams polyfill has no `.set()`, so build the string by hand.
@@ -136,6 +150,7 @@ function filtersToQuery(f: ProductFilters): string[] {
     csv('department', f.departments),
     csv('store', f.stores),
     csv('status', f.statuses),
+    f.onSale ? 'sale=1' : '',
   ];
 }
 
@@ -165,6 +180,8 @@ export type FilterFacets = {
   departments: Facet[];
   stores: Facet[];
   statuses: Facet[];
+  /** How many of the (otherwise-filtered) products are on sale. */
+  saleCount: number;
   /** How many products the whole current selection returns. */
   total: number;
 };

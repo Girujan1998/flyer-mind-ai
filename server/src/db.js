@@ -54,6 +54,9 @@ db.exec(`
     category    TEXT,
     tags        TEXT,
     department  TEXT,
+    was_price   TEXT,
+    promo_text  TEXT,
+    on_sale     INTEGER NOT NULL DEFAULT 0,
     has_thumb   INTEGER NOT NULL DEFAULT 0,
     created_at  TEXT NOT NULL
   );
@@ -70,6 +73,9 @@ for (const [table, col] of [
   ['products', 'category TEXT'],
   ['products', 'tags TEXT'],
   ['products', 'department TEXT'],
+  ['products', 'was_price TEXT'],
+  ['products', 'promo_text TEXT'],
+  ['products', 'on_sale INTEGER NOT NULL DEFAULT 0'],
 ]) {
   try {
     db.exec(`ALTER TABLE ${table} ADD COLUMN ${col}`);
@@ -92,9 +98,9 @@ const stmts = {
   ),
   insertProduct: db.prepare(
     `INSERT INTO products
-       (id, flyer_id, page, name, price, price_value, info, box, confidence, category, tags, department, has_thumb, created_at)
+       (id, flyer_id, page, name, price, price_value, info, box, confidence, category, tags, department, was_price, promo_text, on_sale, has_thumb, created_at)
      VALUES
-       (@id, @flyer_id, @page, @name, @price, @price_value, @info, @box, @confidence, @category, @tags, @department, @has_thumb, @created_at)`,
+       (@id, @flyer_id, @page, @name, @price, @price_value, @info, @box, @confidence, @category, @tags, @department, @was_price, @promo_text, @on_sale, @has_thumb, @created_at)`,
   ),
   updateCategory: db.prepare(
     'UPDATE products SET category = @category, tags = @tags WHERE id = @id',
@@ -204,6 +210,9 @@ export const saveExtraction = db.transaction(
         category: pr.category || null,
         tags: pr.tags && pr.tags.length ? JSON.stringify(pr.tags) : null,
         department: pr.department || null,
+        was_price: pr.wasPrice || null,
+        promo_text: pr.promoText || null,
+        on_sale: pr.onSale ? 1 : 0,
         has_thumb: thumb ? 1 : 0,
         created_at: now,
       });
@@ -307,8 +316,10 @@ const toList = v =>
     .map(s => String(s).trim())
     .filter(Boolean);
 
+const truthy = v => v === true || v === 1 || v === '1' || v === 'true';
+
 // { clause, params } for the shared WHERE. Both callers JOIN flyers as `f`.
-function buildWhere({q, departments, stores, statuses}, today) {
+function buildWhere({q, departments, stores, statuses, onSale}, today) {
   const conds = [];
   const params = [];
 
@@ -344,6 +355,10 @@ function buildWhere({q, departments, stores, statuses}, today) {
     params.push(today, today, ...stz);
   }
 
+  if (truthy(onSale)) {
+    conds.push('p.on_sale = 1');
+  }
+
   return {clause: conds.length ? `WHERE ${conds.join(' AND ')}` : '', params};
 }
 
@@ -355,14 +370,17 @@ function buildWhere({q, departments, stores, statuses}, today) {
  * Returns { products, pages, total, hasMore }.
  */
 export function searchProducts(
-  {q = '', departments, stores, statuses, limit = 20, offset = 0},
+  {q = '', departments, stores, statuses, onSale, limit = 20, offset = 0},
   baseUrl,
 ) {
   const lim = Math.max(1, Math.min(100, Number(limit) || 20));
   const off = Math.max(0, Number(offset) || 0);
   const today = todayIso();
 
-  const {clause, params} = buildWhere({q, departments, stores, statuses}, today);
+  const {clause, params} = buildWhere(
+    {q, departments, stores, statuses, onSale},
+    today,
+  );
 
   const total = db
     .prepare(
@@ -375,7 +393,8 @@ export function searchProducts(
   const rows = db
     .prepare(
       `SELECT p.id, p.flyer_id, p.page, p.name, p.price, p.price_value, p.info,
-              p.box, p.confidence, p.category, p.tags, p.department, p.has_thumb,
+              p.box, p.confidence, p.category, p.tags, p.department,
+              p.was_price, p.promo_text, p.on_sale, p.has_thumb,
               f.store, f.valid_from, f.valid_to
          FROM products p
          JOIN flyers f ON f.id = p.flyer_id
@@ -398,6 +417,9 @@ export function searchProducts(
     category: r.category || '',
     tags: r.tags ? safeJsonArray(r.tags) : [],
     department: r.department || '',
+    wasPrice: r.was_price || '',
+    promoText: r.promo_text || '',
+    onSale: !!r.on_sale,
     store: r.store || '',
     validFrom: r.valid_from || '',
     validTo: r.valid_to || '',
@@ -446,12 +468,18 @@ const andWhere = (clause, extra) =>
  * and picking within a section never zeroes its own rows. An empty section is
  * simply no constraint.
  */
-export function filterFacets({q = '', departments, stores, statuses} = {}) {
+export function filterFacets({
+  q = '',
+  departments,
+  stores,
+  statuses,
+  onSale,
+} = {}) {
   const today = todayIso();
   const FROM = 'FROM products p JOIN flyers f ON f.id = p.flyer_id';
 
   // departments list — every filter except departments
-  const dw = buildWhere({q, stores, statuses}, today);
+  const dw = buildWhere({q, stores, statuses, onSale}, today);
   const deptRows = db
     .prepare(
       `SELECT p.department AS value, COUNT(*) AS n ${FROM}
@@ -461,7 +489,7 @@ export function filterFacets({q = '', departments, stores, statuses} = {}) {
     .all(...dw.params);
 
   // stores list — every filter except stores
-  const sw = buildWhere({q, departments, statuses}, today);
+  const sw = buildWhere({q, departments, statuses, onSale}, today);
   const storeRows = db
     .prepare(
       `SELECT f.store AS value, COUNT(*) AS n ${FROM}
@@ -471,7 +499,7 @@ export function filterFacets({q = '', departments, stores, statuses} = {}) {
     .all(...sw.params);
 
   // statuses list — every filter except statuses
-  const tw = buildWhere({q, departments, stores}, today);
+  const tw = buildWhere({q, departments, stores, onSale}, today);
   const byStatus = new Map(
     db
       .prepare(
@@ -482,8 +510,16 @@ export function filterFacets({q = '', departments, stores, statuses} = {}) {
       .map(r => [r.value, r.n]),
   );
 
+  // on-sale count — every filter except onSale itself
+  const ow = buildWhere({q, departments, stores, statuses}, today);
+  const saleCount = db
+    .prepare(
+      `SELECT COUNT(*) AS n ${FROM} ${andWhere(ow.clause, 'p.on_sale = 1')}`,
+    )
+    .get(...ow.params).n;
+
   // total — the whole selection
-  const all = buildWhere({q, departments, stores, statuses}, today);
+  const all = buildWhere({q, departments, stores, statuses, onSale}, today);
   const total = db
     .prepare(`SELECT COUNT(*) AS n ${FROM} ${all.clause}`)
     .get(...all.params).n;
@@ -496,6 +532,7 @@ export function filterFacets({q = '', departments, stores, statuses} = {}) {
       .sort()
       .filter(s => byStatus.get(s))
       .map(s => ({value: s, count: byStatus.get(s)})),
+    saleCount,
     total,
   };
 }

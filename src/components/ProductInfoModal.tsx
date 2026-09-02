@@ -77,8 +77,21 @@ function ProductInfoModal({
                 {product.category ? (
                   <Text style={styles.category}>{product.category}</Text>
                 ) : null}
-                {product.price ? (
-                  <Text style={styles.price}>{product.price}</Text>
+                <View style={styles.priceRow}>
+                  {product.price ? (
+                    <Text style={styles.price}>{product.price}</Text>
+                  ) : null}
+                  {product.wasPrice ? (
+                    <Text style={styles.wasPrice}>{product.wasPrice}</Text>
+                  ) : null}
+                  {product.onSale ? (
+                    <View style={styles.salePill}>
+                      <Text style={styles.saleText}>SALE</Text>
+                    </View>
+                  ) : null}
+                </View>
+                {product.promoText ? (
+                  <Text style={styles.promo}>{product.promoText}</Text>
                 ) : null}
                 {product.info ? (
                   <Text style={styles.details}>{product.info}</Text>
@@ -186,7 +199,26 @@ const styles = StyleSheet.create({
     textTransform: 'capitalize',
     letterSpacing: 0.3,
   },
+  priceRow: {flexDirection: 'row', alignItems: 'center', gap: spacing.sm},
   price: {color: colors.primary, fontSize: 22, fontWeight: '800'},
+  wasPrice: {
+    color: colors.textMuted,
+    fontSize: 15,
+    textDecorationLine: 'line-through',
+  },
+  salePill: {
+    paddingVertical: 2,
+    paddingHorizontal: 7,
+    borderRadius: 4,
+    backgroundColor: colors.danger,
+  },
+  saleText: {
+    color: '#fff',
+    fontSize: 11,
+    fontWeight: '800',
+    letterSpacing: 0.5,
+  },
+  promo: {color: colors.danger, fontSize: 13, fontWeight: '700'},
   details: {
     color: colors.textMuted,
     fontSize: 13,
