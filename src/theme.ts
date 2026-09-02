@@ -55,24 +55,25 @@ export const lightPalette: Palette = {
 };
 
 export const darkPalette: Palette = {
-  background: '#1a1916',
-  surface: '#242320',
-  surfaceAlt: '#2e2c28',
+  // A darker ground so raised surfaces stand off it.
+  background: '#121110',
+  surface: '#26241f',
+  surfaceAlt: '#332f29',
   imageBackdrop: '#f4f2ec',
-  border: 'rgba(239, 236, 227, 0.13)',
-  text: '#efece3',
-  textMuted: '#a49e92',
+  border: 'rgba(239, 236, 227, 0.2)',
+  text: '#f1eee6',
+  textMuted: '#aca699',
   primary: '#4fc78a',
   primaryTint: 'rgba(79, 199, 138, 0.16)',
   onPrimary: '#122019',
   deal: '#ff7a52',
   dealTint: 'rgba(255, 122, 82, 0.16)',
   danger: '#f2867e',
-  scrim: 'rgba(0, 0, 0, 0.55)',
-  navBackground: '#100f0d',
-  navBorder: 'rgba(239, 236, 227, 0.1)',
-  navInactive: 'rgba(239, 236, 227, 0.58)',
-  navActiveText: '#100f0d',
+  scrim: 'rgba(0, 0, 0, 0.6)',
+  navBackground: '#0c0b0a',
+  navBorder: 'rgba(239, 236, 227, 0.12)',
+  navInactive: 'rgba(241, 238, 230, 0.6)',
+  navActiveText: '#0c0b0a',
 };
 
 export function useTheme(): {colors: Palette; dark: boolean} {
