@@ -21,8 +21,29 @@ import {colors, radius, spacing} from '../theme';
 type Phase =
   | {kind: 'idle'}
   | {kind: 'uploading'}
+  | {kind: 'reconnecting'; attempt: number}
   | {kind: 'done'; result: UploadResult}
   | {kind: 'error'; message: string};
+
+/** How long to keep retrying after the connection drops (phone lock, Wi-Fi blip). */
+const RETRY_WINDOW_MS = 5 * 60 * 1000;
+const RETRY_GAP_MS = 3000;
+
+/** Sleep that resolves early if the signal aborts. */
+function delay(ms: number, signal: AbortSignal): Promise<void> {
+  return new Promise(resolve => {
+    if (signal.aborted) {
+      resolve();
+      return;
+    }
+    const t = setTimeout(resolve, ms);
+    const onAbort = () => {
+      clearTimeout(t);
+      resolve();
+    };
+    signal.addEventListener?.('abort', onAbort);
+  });
+}
 
 function formatBytes(bytes: number): string {
   if (bytes < 1024) {
@@ -38,7 +59,7 @@ function UploadScreen(): React.JSX.Element {
   const [file, setFile] = useState<SelectedPdf | null>(null);
   const [phase, setPhase] = useState<Phase>({kind: 'idle'});
   const abortRef = useRef<AbortController | null>(null);
-  const uploading = phase.kind === 'uploading';
+  const working = phase.kind === 'uploading' || phase.kind === 'reconnecting';
 
   const selectPdf = async () => {
     try {
@@ -67,30 +88,52 @@ function UploadScreen(): React.JSX.Element {
   };
 
   const upload = async () => {
-    if (!file || uploading) {
+    if (!file || working) {
       return;
     }
     const controller = new AbortController();
     abortRef.current = controller;
     setPhase({kind: 'uploading'});
+
+    const stopAt = Date.now() + RETRY_WINDOW_MS;
+    let attempt = 0;
     try {
-      const result = await extractFlyer(file, controller.signal);
-      setPhase({kind: 'done', result});
-      setFile(null);
-    } catch (err) {
-      if (err instanceof AbortedError || controller.signal.aborted) {
-        setPhase({kind: 'idle'}); // user stopped it — no error
-        return;
+      for (;;) {
+        try {
+          const result = await extractFlyer(file, controller.signal);
+          setPhase({kind: 'done', result});
+          setFile(null);
+          return;
+        } catch (err) {
+          if (err instanceof AbortedError || controller.signal.aborted) {
+            setPhase({kind: 'idle'}); // user stopped it — no error
+            return;
+          }
+          // The phone locking / Wi-Fi dropping kills the request, but the
+          // server keeps going and dedups the retry — so keep trying rather
+          // than failing. A retry after unlock usually resolves on attempt 1.
+          if (err instanceof NoServerError && Date.now() < stopAt) {
+            attempt += 1;
+            setPhase({kind: 'reconnecting', attempt});
+            await delay(RETRY_GAP_MS, controller.signal);
+            if (controller.signal.aborted) {
+              setPhase({kind: 'idle'});
+              return;
+            }
+            continue;
+          }
+          setPhase({
+            kind: 'error',
+            message:
+              err instanceof NoServerError
+                ? err.message
+                : err instanceof Error
+                ? err.message
+                : 'Upload failed',
+          });
+          return;
+        }
       }
-      setPhase({
-        kind: 'error',
-        message:
-          err instanceof NoServerError
-            ? err.message
-            : err instanceof Error
-            ? err.message
-            : 'Upload failed',
-      });
     } finally {
       abortRef.current = null;
     }
@@ -163,23 +206,26 @@ function UploadScreen(): React.JSX.Element {
 
       <Pressable
         onPress={selectPdf}
-        disabled={uploading}
+        disabled={working}
         style={({pressed}) => [
           styles.btn,
           styles.btnGhost,
-          uploading && styles.btnDisabled,
+          working && styles.btnDisabled,
           pressed && styles.pressed,
         ]}>
         <Text style={styles.btnGhostText}>Select PDF</Text>
       </Pressable>
 
-      {uploading ? (
+      {working ? (
         <>
           <View style={styles.uploadingRow}>
             <ActivityIndicator color={colors.primary} />
             <Text style={styles.uploadingText}>
-              Extracting products… this keeps running if you switch tabs or
-              leave the app.
+              {phase.kind === 'reconnecting'
+                ? `Connection dropped — reconnecting. Your flyer is still being processed on the server${
+                    phase.attempt > 1 ? ` (attempt ${phase.attempt})` : ''
+                  }.`
+                : 'Extracting products… this keeps running if you switch tabs or leave the app.'}
             </Text>
           </View>
           <Pressable

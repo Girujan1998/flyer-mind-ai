@@ -77,6 +77,74 @@ app.get('/health', (_req, res) => {
   });
 });
 
+// Extractions in progress, keyed by the PDF's sha256. If the phone locks and the
+// app's upload connection dies mid-extraction, the app retries the same POST —
+// this lets that retry attach to the running job instead of starting a second
+// (wasted) Gemini pass. A finished flyer is deduped by findFlyerByHash instead.
+const inFlight = new Map();
+
+async function runExtraction({buffer, name, hash, rendered, maxPages}) {
+  const t0 = Date.now();
+  const [{products, usage}, metaResult] = await Promise.all([
+    extractFlyer(rendered.pages.map(p => ({page: p.page, jpeg: p.jpegBase64}))),
+    extractFlyerMeta(rendered.pages[0].jpegBase64).catch(err => {
+      console.warn(`[gemini] flyer-meta failed: ${err.message}`);
+      return null;
+    }),
+  ]);
+
+  const meta = metaResult?.meta ?? null;
+  if (metaResult) {
+    const mu = metaResult.usage || {};
+    console.log(
+      `[gemini] flyer-meta  store=${JSON.stringify(meta.store)}  ` +
+        `valid=${meta.validFrom || '?'}..${meta.validTo || '?'}  ` +
+        `confidence=${meta.confidence ?? '?'}  ` +
+        `prompt=${mu.promptTokens ?? 0} (image ${mu.promptImageTokens ?? 0})  ` +
+        `output=${mu.outputTokens ?? 0}  thoughts=${mu.thoughtsTokens ?? 0}  ` +
+        `total=${mu.totalTokens ?? 0}`,
+    );
+  }
+
+  let thumbs;
+  try {
+    thumbs = renderThumbs(buffer, products, {maxPages});
+  } catch (err) {
+    console.warn(`[thumbs] skipped: ${err.message}`);
+  }
+
+  const {flyerId, savedProducts} = saveExtraction({
+    name,
+    hash,
+    totalPages: rendered.totalPages,
+    renderedPages: rendered.renderedPages,
+    pages: rendered.pages,
+    products,
+    thumbs,
+    meta,
+  });
+
+  console.log(
+    `[extract] ${name} — ${rendered.renderedPages} page(s), ` +
+      `${savedProducts} product(s) saved, ${((Date.now() - t0) / 1000).toFixed(
+        1,
+      )}s`,
+  );
+
+  return {
+    flyerId,
+    name,
+    savedProducts,
+    renderedPages: rendered.renderedPages,
+    totalPages: rendered.totalPages,
+    store: meta?.store || '',
+    validFrom: meta?.validFrom || '',
+    validTo: meta?.validTo || '',
+    failedPages: usage.failedPages ?? [],
+    reused: false,
+  };
+}
+
 /**
  * POST /flyers/extract   (multipart/form-data, field "file" = the flyer PDF)
  *
@@ -84,7 +152,8 @@ app.get('/health', (_req, res) => {
  * and returns only a summary (the products live in the DB, seen via /products):
  *   { flyerId, name, savedProducts, renderedPages, totalPages, failedPages, reused }
  *
- * If this exact PDF was uploaded before (same sha256), it is not re-extracted.
+ * Re-posting the same PDF is safe: if it finished it returns the stored summary
+ * (`reused: true`); if it's still running the request waits on that same job.
  */
 app.post('/flyers/extract', upload.single('file'), async (req, res) => {
   try {
@@ -99,10 +168,12 @@ app.post('/flyers/extract', upload.single('file'), async (req, res) => {
         .json({error: `Expected a PDF, got "${req.file.mimetype}".`});
     }
 
+    const name = req.file.originalname || 'flyer.pdf';
     const hash = createHash('sha256').update(req.file.buffer).digest('hex');
+
     const existing = findFlyerByHash(hash);
     if (existing) {
-      console.log(`[extract] ${req.file.originalname} — already stored, skipping Gemini`);
+      console.log(`[extract] ${name} — already stored, skipping Gemini`);
       return res.json({
         flyerId: existing.id,
         name: existing.name,
@@ -121,80 +192,47 @@ app.post('/flyers/extract', upload.single('file'), async (req, res) => {
       ? Number(req.query.maxpages)
       : undefined;
 
-    let rendered;
-    try {
-      rendered = renderPdf(req.file.buffer, {maxPages});
-    } catch (err) {
-      return res
-        .status(422)
-        .json({error: `Could not read the PDF: ${err.message}`});
-    }
-    if (!rendered.pages.length) {
-      return res.status(422).json({error: 'The PDF has no renderable pages.'});
-    }
+    let job = inFlight.get(hash);
+    if (job) {
+      console.log(`[extract] ${name} — attaching to the in-flight job`);
+    } else {
+      let rendered;
+      try {
+        rendered = renderPdf(req.file.buffer, {maxPages});
+      } catch (err) {
+        return res
+          .status(422)
+          .json({error: `Could not read the PDF: ${err.message}`});
+      }
+      if (!rendered.pages.length) {
+        return res
+          .status(422)
+          .json({error: 'The PDF has no renderable pages.'});
+      }
 
-    const t0 = Date.now();
-    const [{products, usage}, metaResult] = await Promise.all([
-      extractFlyer(rendered.pages.map(p => ({page: p.page, jpeg: p.jpegBase64}))),
-      extractFlyerMeta(rendered.pages[0].jpegBase64).catch(err => {
-        console.warn(`[gemini] flyer-meta failed: ${err.message}`);
-        return null;
-      }),
-    ]);
-
-    const meta = metaResult?.meta ?? null;
-    if (metaResult) {
-      const mu = metaResult.usage || {};
-      console.log(
-        `[gemini] flyer-meta  store=${JSON.stringify(meta.store)}  ` +
-          `valid=${meta.validFrom || '?'}..${meta.validTo || '?'}  ` +
-          `confidence=${meta.confidence ?? '?'}  ` +
-          `prompt=${mu.promptTokens ?? 0} (image ${mu.promptImageTokens ?? 0})  ` +
-          `output=${mu.outputTokens ?? 0}  thoughts=${mu.thoughtsTokens ?? 0}  ` +
-          `total=${mu.totalTokens ?? 0}`,
-      );
+      job = runExtraction({
+        buffer: req.file.buffer,
+        name,
+        hash,
+        rendered,
+        maxPages,
+      });
+      inFlight.set(hash, job);
+      const clear = () => inFlight.delete(hash);
+      job.then(clear, clear);
     }
 
-    let thumbs;
-    try {
-      thumbs = renderThumbs(req.file.buffer, products, {maxPages});
-    } catch (err) {
-      console.warn(`[thumbs] skipped: ${err.message}`);
+    const summary = await job;
+    // The original request's socket may be dead (phone locked) while its retry
+    // is the one still listening — only answer a live connection.
+    if (!res.writableEnded) {
+      res.json(summary);
     }
-
-    const {flyerId, savedProducts} = saveExtraction({
-      name: req.file.originalname || 'flyer.pdf',
-      hash,
-      totalPages: rendered.totalPages,
-      renderedPages: rendered.renderedPages,
-      pages: rendered.pages,
-      products,
-      thumbs,
-      meta,
-    });
-
-    console.log(
-      `[extract] ${req.file.originalname} — ${rendered.renderedPages} page(s), ` +
-        `${savedProducts} product(s) saved, ${((Date.now() - t0) / 1000).toFixed(
-          1,
-        )}s`,
-    );
-
-    res.json({
-      flyerId,
-      name: req.file.originalname || 'flyer.pdf',
-      savedProducts,
-      renderedPages: rendered.renderedPages,
-      totalPages: rendered.totalPages,
-      store: meta?.store || '',
-      validFrom: meta?.validFrom || '',
-      validTo: meta?.validTo || '',
-      failedPages: usage.failedPages ?? [],
-      reused: false,
-    });
   } catch (err) {
     console.error('[extract] failed:', err);
-    res.status(500).json({error: err?.message || 'Extraction failed'});
+    if (!res.writableEnded) {
+      res.status(500).json({error: err?.message || 'Extraction failed'});
+    }
   }
 });
 
