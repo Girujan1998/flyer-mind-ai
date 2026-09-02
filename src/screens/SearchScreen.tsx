@@ -180,17 +180,32 @@ function SearchScreen(): React.JSX.Element {
     <View style={styles.container}>
       <View style={styles.searchWrap}>
         <View style={styles.searchRow}>
-          <TextInput
-            style={styles.input}
-            value={query}
-            onChangeText={setQuery}
-            placeholder="Search products"
-            placeholderTextColor={colors.textMuted}
-            autoCapitalize="none"
-            autoCorrect={false}
-            returnKeyType="search"
-            clearButtonMode="while-editing"
-          />
+          <View style={styles.inputWrap}>
+            <TextInput
+              style={styles.input}
+              value={query}
+              onChangeText={setQuery}
+              placeholder="Search products"
+              placeholderTextColor={colors.textMuted}
+              autoCapitalize="none"
+              autoCorrect={false}
+              returnKeyType="search"
+            />
+            {query.length > 0 ? (
+              <Pressable
+                onPress={() => setQuery('')}
+                accessibilityRole="button"
+                accessibilityLabel="Clear search"
+                hitSlop={10}
+                style={({pressed}) => [
+                  styles.clearBtn,
+                  pressed && styles.pressed,
+                ]}>
+                <View style={[styles.clearBar, styles.clearBarA]} />
+                <View style={[styles.clearBar, styles.clearBarB]} />
+              </Pressable>
+            ) : null}
+          </View>
           <Pressable
             onPress={() => setFilterOpen(true)}
             accessibilityRole="button"
@@ -328,17 +343,37 @@ const styles = StyleSheet.create({
     paddingBottom: spacing.sm,
   },
   searchRow: {flexDirection: 'row', alignItems: 'center', gap: spacing.sm},
+  inputWrap: {flex: 1, justifyContent: 'center'},
   input: {
-    flex: 1,
     height: FILTER_BTN,
     borderRadius: radius.md,
     borderWidth: 1,
     borderColor: colors.border,
     backgroundColor: colors.surface,
-    paddingHorizontal: spacing.md,
+    paddingLeft: spacing.md,
+    paddingRight: 36,
     fontSize: 15,
     color: colors.text,
   },
+  clearBtn: {
+    position: 'absolute',
+    right: 8,
+    width: 20,
+    height: 20,
+    borderRadius: 10,
+    backgroundColor: colors.textMuted,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  clearBar: {
+    position: 'absolute',
+    width: 10,
+    height: 1.5,
+    borderRadius: 1,
+    backgroundColor: '#fff',
+  },
+  clearBarA: {transform: [{rotate: '45deg'}]},
+  clearBarB: {transform: [{rotate: '-45deg'}]},
   filterBtn: {
     width: FILTER_BTN,
     height: FILTER_BTN,

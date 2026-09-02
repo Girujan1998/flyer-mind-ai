@@ -4,6 +4,7 @@ import {
   StatusBar,
   StyleSheet,
   useColorScheme,
+  View,
 } from 'react-native';
 
 import PillNavBar, {TabKey} from './src/navigation/PillNavBar';
@@ -11,25 +12,27 @@ import ChatScreen from './src/screens/ChatScreen';
 import SearchScreen from './src/screens/SearchScreen';
 import UploadScreen from './src/screens/UploadScreen';
 
-function ActiveScreen({tab}: {tab: TabKey}): React.JSX.Element {
-  switch (tab) {
-    case 'search':
-      return <SearchScreen />;
-    case 'chat':
-      return <ChatScreen />;
-    default:
-      return <UploadScreen />;
-  }
-}
-
 function App(): React.JSX.Element {
   const isDarkMode = useColorScheme() === 'dark';
   const [activeTab, setActiveTab] = useState<TabKey>('upload');
 
+  // Every screen stays mounted so its state (an in-progress upload, the search
+  // query + filters + scroll position) survives switching tabs, leaving the app,
+  // or the phone sleeping. A full relaunch is the only thing that resets it.
   return (
     <SafeAreaView style={styles.container}>
       <StatusBar barStyle={isDarkMode ? 'light-content' : 'dark-content'} />
-      <ActiveScreen tab={activeTab} />
+
+      <View style={[styles.screen, activeTab !== 'upload' && styles.hidden]}>
+        <UploadScreen />
+      </View>
+      <View style={[styles.screen, activeTab !== 'search' && styles.hidden]}>
+        <SearchScreen />
+      </View>
+      <View style={[styles.screen, activeTab !== 'chat' && styles.hidden]}>
+        <ChatScreen />
+      </View>
+
       <PillNavBar activeTab={activeTab} onTabPress={setActiveTab} />
     </SafeAreaView>
   );
@@ -40,6 +43,10 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: '#fff',
   },
+  // The active screen takes all the space; hidden ones are dropped from layout
+  // but stay mounted, keeping their state.
+  screen: {flex: 1},
+  hidden: {display: 'none'},
 });
 
 export default App;

@@ -1,4 +1,4 @@
-import React, {useState} from 'react';
+import React, {useRef, useState} from 'react';
 import {
   ActivityIndicator,
   Pressable,
@@ -9,6 +9,7 @@ import {
 import DocumentPicker, {isCancel, types} from 'react-native-document-picker';
 
 import {
+  AbortedError,
   NoServerError,
   SelectedPdf,
   UploadResult,
@@ -36,6 +37,8 @@ function formatBytes(bytes: number): string {
 function UploadScreen(): React.JSX.Element {
   const [file, setFile] = useState<SelectedPdf | null>(null);
   const [phase, setPhase] = useState<Phase>({kind: 'idle'});
+  const abortRef = useRef<AbortController | null>(null);
+  const uploading = phase.kind === 'uploading';
 
   const selectPdf = async () => {
     try {
@@ -64,15 +67,21 @@ function UploadScreen(): React.JSX.Element {
   };
 
   const upload = async () => {
-    if (!file) {
+    if (!file || uploading) {
       return;
     }
+    const controller = new AbortController();
+    abortRef.current = controller;
     setPhase({kind: 'uploading'});
     try {
-      const result = await extractFlyer(file);
+      const result = await extractFlyer(file, controller.signal);
       setPhase({kind: 'done', result});
       setFile(null);
     } catch (err) {
+      if (err instanceof AbortedError || controller.signal.aborted) {
+        setPhase({kind: 'idle'}); // user stopped it — no error
+        return;
+      }
       setPhase({
         kind: 'error',
         message:
@@ -82,8 +91,12 @@ function UploadScreen(): React.JSX.Element {
             ? err.message
             : 'Upload failed',
       });
+    } finally {
+      abortRef.current = null;
     }
   };
+
+  const stopUpload = () => abortRef.current?.abort();
 
   if (phase.kind === 'done') {
     const {
@@ -150,29 +163,48 @@ function UploadScreen(): React.JSX.Element {
 
       <Pressable
         onPress={selectPdf}
+        disabled={uploading}
         style={({pressed}) => [
           styles.btn,
           styles.btnGhost,
+          uploading && styles.btnDisabled,
           pressed && styles.pressed,
         ]}>
         <Text style={styles.btnGhostText}>Select PDF</Text>
       </Pressable>
 
-      <Pressable
-        onPress={upload}
-        disabled={!file || phase.kind === 'uploading'}
-        style={({pressed}) => [
-          styles.btn,
-          styles.btnPrimary,
-          (!file || phase.kind === 'uploading') && styles.btnDisabled,
-          pressed && styles.pressed,
-        ]}>
-        {phase.kind === 'uploading' ? (
-          <ActivityIndicator color="#fff" />
-        ) : (
+      {uploading ? (
+        <>
+          <View style={styles.uploadingRow}>
+            <ActivityIndicator color={colors.primary} />
+            <Text style={styles.uploadingText}>
+              Extracting products… this keeps running if you switch tabs or
+              leave the app.
+            </Text>
+          </View>
+          <Pressable
+            onPress={stopUpload}
+            style={({pressed}) => [
+              styles.btn,
+              styles.btnStop,
+              pressed && styles.pressed,
+            ]}>
+            <Text style={styles.btnStopText}>Stop upload</Text>
+          </Pressable>
+        </>
+      ) : (
+        <Pressable
+          onPress={upload}
+          disabled={!file}
+          style={({pressed}) => [
+            styles.btn,
+            styles.btnPrimary,
+            !file && styles.btnDisabled,
+            pressed && styles.pressed,
+          ]}>
           <Text style={styles.btnPrimaryText}>Upload flyer</Text>
-        )}
-      </Pressable>
+        </Pressable>
+      )}
 
       {phase.kind === 'error' ? (
         <Text style={styles.error}>{phase.message}</Text>
@@ -219,8 +251,22 @@ const styles = StyleSheet.create({
   btnGhostText: {color: colors.textMuted, fontSize: 15, fontWeight: '600'},
   btnPrimary: {backgroundColor: colors.primary},
   btnPrimaryText: {color: '#fff', fontSize: 15, fontWeight: '600'},
+  btnStop: {borderWidth: 1, borderColor: colors.danger},
+  btnStopText: {color: colors.danger, fontSize: 15, fontWeight: '600'},
   btnDisabled: {opacity: 0.5},
   pressed: {opacity: 0.7},
+  uploadingRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.sm,
+    paddingVertical: spacing.xs,
+  },
+  uploadingText: {
+    flex: 1,
+    color: colors.textMuted,
+    fontSize: 13,
+    lineHeight: 18,
+  },
   error: {color: colors.danger, fontSize: 14},
   doneCard: {
     backgroundColor: colors.surface,

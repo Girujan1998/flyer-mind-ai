@@ -61,11 +61,25 @@ export const pageKey = (flyerId: string, page: number) => `${flyerId}:${page}`;
 
 export class NoServerError extends Error {}
 
+/** Thrown when a request is cancelled via its AbortSignal. */
+export class AbortedError extends Error {
+  constructor() {
+    super('Cancelled');
+    this.name = 'AbortedError';
+  }
+}
+
 async function api<T>(path: string, init?: RequestInit): Promise<T> {
   let response: Response;
   try {
     response = await fetch(`${API_BASE_URL}${path}`, init);
-  } catch {
+  } catch (err) {
+    if (
+      (err as {name?: string} | null)?.name === 'AbortError' ||
+      init?.signal?.aborted
+    ) {
+      throw new AbortedError();
+    }
     throw new NoServerError(
       `Can't reach the extraction server at ${API_BASE_URL}. Is it running?`,
     );
@@ -100,14 +114,21 @@ export type UploadResult = {
  * SAVES the products + bounding boxes to its database. Returns a summary only —
  * browse the products on the Search screen.
  */
-export function extractFlyer(file: SelectedPdf): Promise<UploadResult> {
+export function extractFlyer(
+  file: SelectedPdf,
+  signal?: AbortSignal,
+): Promise<UploadResult> {
   const form = new FormData();
   form.append('file', {
     uri: file.uri,
     name: file.name || 'flyer.pdf',
     type: file.mimeType || 'application/pdf',
   } as unknown as Blob);
-  return api<UploadResult>('/flyers/extract', {method: 'POST', body: form});
+  return api<UploadResult>('/flyers/extract', {
+    method: 'POST',
+    body: form,
+    signal,
+  });
 }
 
 export type SearchResult = {
