@@ -431,7 +431,9 @@ const makeStyles = (c: Palette) =>
     retry: {marginTop: spacing.md, padding: spacing.sm},
     retryText: {color: c.primary, fontSize: 14, fontWeight: '600'},
     grid: {padding: spacing.md, paddingBottom: 96, gap: GAP},
-    column: {gap: GAP},
+    // stretch both cards in a row to the taller one's height so their footers
+    // (store label) line up
+    column: {gap: GAP, alignItems: 'stretch'},
     footer: {paddingVertical: spacing.lg, alignItems: 'center'},
     footerEnd: {
       textAlign: 'center',

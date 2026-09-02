@@ -172,7 +172,7 @@ const makeStyles = (c: Palette) =>
       justifyContent: 'center',
     },
     badgeText: {color: '#fff', fontSize: 12, fontWeight: '800', lineHeight: 14},
-    body: {padding: spacing.sm, gap: 4},
+    body: {flex: 1, padding: spacing.sm, gap: 4},
     name: {
       color: c.text,
       fontFamily: fonts.semibold,
@@ -229,7 +229,8 @@ const makeStyles = (c: Palette) =>
     },
     store: {
       alignSelf: 'flex-end',
-      marginTop: 2,
+      marginTop: 'auto',
+      paddingTop: 2,
       color: c.textMuted,
       fontSize: 10,
       fontWeight: '600',
