@@ -4,7 +4,6 @@ import {
   Dimensions,
   FlatList,
   Pressable,
-  ScrollView,
   StyleSheet,
   Text,
   TextInput,
@@ -12,14 +11,18 @@ import {
 } from 'react-native';
 
 import {
-  DepartmentCount,
+  EMPTY_FILTERS,
+  FilterFacets,
   FlyerPage,
   NoServerError,
   Product,
-  fetchDepartments,
+  ProductFilters,
+  countActiveFilters,
+  fetchFilterFacets,
   pageKey,
   searchProducts,
 } from '../api/extract';
+import FilterModal from '../components/FilterModal';
 import ProductCard from '../components/ProductCard';
 import ProductInfoModal from '../components/ProductInfoModal';
 import SourcePageModal from '../components/SourcePageModal';
@@ -30,15 +33,15 @@ const GAP = spacing.sm;
 const COLUMN_WIDTH =
   (Dimensions.get('window').width - spacing.md * 2 - GAP) / 2;
 
-function titleCase(s: string): string {
-  return s.replace(/\b\w/g, c => c.toUpperCase());
-}
+const NO_FACETS: FilterFacets = {departments: [], stores: [], statuses: []};
 
 function SearchScreen(): React.JSX.Element {
   const [query, setQuery] = useState('');
   const [debounced, setDebounced] = useState('');
-  const [department, setDepartment] = useState('');
-  const [departments, setDepartments] = useState<DepartmentCount[]>([]);
+
+  const [filters, setFilters] = useState<ProductFilters>(EMPTY_FILTERS);
+  const [facets, setFacets] = useState<FilterFacets>(NO_FACETS);
+  const [filterOpen, setFilterOpen] = useState(false);
 
   const [products, setProducts] = useState<Product[]>([]);
   const [pages, setPages] = useState<Map<string, FlyerPage>>(new Map());
@@ -53,17 +56,19 @@ function SearchScreen(): React.JSX.Element {
   const [infoProduct, setInfoProduct] = useState<Product | null>(null);
   const [flyerProduct, setFlyerProduct] = useState<Product | null>(null);
 
+  const activeFilters = countActiveFilters(filters);
+
   // debounce the search box
   useEffect(() => {
     const id = setTimeout(() => setDebounced(query.trim()), 350);
     return () => clearTimeout(id);
   }, [query]);
 
-  // the aisle filter chips — load once, refresh when the catalog might have grown
+  // filter options — load once
   useEffect(() => {
-    fetchDepartments()
-      .then(res => setDepartments(res.departments))
-      .catch(() => setDepartments([]));
+    fetchFilterFacets()
+      .then(setFacets)
+      .catch(() => setFacets(NO_FACETS));
   }, []);
 
   const mergePages = (list: FlyerPage[]) =>
@@ -84,7 +89,7 @@ function SearchScreen(): React.JSX.Element {
     try {
       const res = await searchProducts({
         q: debounced,
-        department,
+        filters,
         limit: PAGE_SIZE,
         offset: 0,
       });
@@ -111,7 +116,7 @@ function SearchScreen(): React.JSX.Element {
         setLoading(false);
       }
     }
-  }, [debounced, department]);
+  }, [debounced, filters]);
 
   useEffect(() => {
     load();
@@ -125,7 +130,7 @@ function SearchScreen(): React.JSX.Element {
     try {
       const res = await searchProducts({
         q: debounced,
-        department,
+        filters,
         limit: PAGE_SIZE,
         offset: products.length,
       });
@@ -168,45 +173,57 @@ function SearchScreen(): React.JSX.Element {
   return (
     <View style={styles.container}>
       <View style={styles.searchWrap}>
-        <TextInput
-          style={styles.input}
-          value={query}
-          onChangeText={setQuery}
-          placeholder="Search products"
-          placeholderTextColor={colors.textMuted}
-          autoCapitalize="none"
-          autoCorrect={false}
-          returnKeyType="search"
-          clearButtonMode="while-editing"
-        />
-      </View>
-
-      {departments.length > 0 ? (
-        <ScrollView
-          horizontal
-          showsHorizontalScrollIndicator={false}
-          contentContainerStyle={styles.chips}
-          keyboardShouldPersistTaps="handled">
-          <Chip
-            label="All"
-            active={department === ''}
-            onPress={() => setDepartment('')}
+        <View style={styles.searchRow}>
+          <TextInput
+            style={styles.input}
+            value={query}
+            onChangeText={setQuery}
+            placeholder="Search products"
+            placeholderTextColor={colors.textMuted}
+            autoCapitalize="none"
+            autoCorrect={false}
+            returnKeyType="search"
+            clearButtonMode="while-editing"
           />
-          {departments.map(d => (
-            <Chip
-              key={d.department}
-              label={titleCase(d.department)}
-              count={d.count}
-              active={department === d.department}
-              onPress={() =>
-                setDepartment(prev =>
-                  prev === d.department ? '' : d.department,
-                )
-              }
-            />
-          ))}
-        </ScrollView>
-      ) : null}
+          <Pressable
+            onPress={() => setFilterOpen(true)}
+            accessibilityRole="button"
+            accessibilityLabel={
+              activeFilters > 0 ? `Filters, ${activeFilters} active` : 'Filters'
+            }
+            style={({pressed}) => [
+              styles.filterBtn,
+              activeFilters > 0 && styles.filterBtnActive,
+              pressed && styles.pressed,
+            ]}>
+            <View style={styles.funnel}>
+              <View
+                style={[
+                  styles.funnelCone,
+                  {
+                    borderTopColor:
+                      activeFilters > 0 ? colors.primary : colors.textMuted,
+                  },
+                ]}
+              />
+              <View
+                style={[
+                  styles.funnelStem,
+                  {
+                    backgroundColor:
+                      activeFilters > 0 ? colors.primary : colors.textMuted,
+                  },
+                ]}
+              />
+            </View>
+            {activeFilters > 0 ? (
+              <View style={styles.filterBadge}>
+                <Text style={styles.filterBadgeText}>{activeFilters}</Text>
+              </View>
+            ) : null}
+          </Pressable>
+        </View>
+      </View>
 
       {loading ? (
         <View style={styles.center}>
@@ -223,13 +240,18 @@ function SearchScreen(): React.JSX.Element {
         <View style={styles.center}>
           <Text style={styles.empty}>
             {debounced
-              ? `No products match "${debounced}"${
-                  department ? ` in ${titleCase(department)}` : ''
-                }.`
-              : department
-              ? `Nothing in ${titleCase(department)} yet.`
+              ? `No products match "${debounced}".`
+              : activeFilters > 0
+              ? 'No products match these filters.'
               : 'No products yet — upload a flyer.'}
           </Text>
+          {activeFilters > 0 ? (
+            <Pressable
+              onPress={() => setFilters(EMPTY_FILTERS)}
+              style={styles.retry}>
+              <Text style={styles.retryText}>Clear filters</Text>
+            </Pressable>
+          ) : null}
         </View>
       ) : (
         <FlatList
@@ -253,6 +275,17 @@ function SearchScreen(): React.JSX.Element {
           ListFooterComponent={renderFooter()}
         />
       )}
+
+      <FilterModal
+        visible={filterOpen}
+        facets={facets}
+        value={filters}
+        onApply={next => {
+          setFilters(next);
+          setFilterOpen(false);
+        }}
+        onClose={() => setFilterOpen(false)}
+      />
 
       <ProductInfoModal
         product={infoProduct}
@@ -278,34 +311,7 @@ function SearchScreen(): React.JSX.Element {
   );
 }
 
-function Chip({
-  label,
-  count,
-  active,
-  onPress,
-}: {
-  label: string;
-  count?: number;
-  active: boolean;
-  onPress: () => void;
-}): React.JSX.Element {
-  return (
-    <Pressable
-      onPress={onPress}
-      accessibilityRole="button"
-      accessibilityState={{selected: active}}
-      style={({pressed}) => [
-        styles.chip,
-        active && styles.chipActive,
-        pressed && styles.pressed,
-      ]}>
-      <Text style={[styles.chipText, active && styles.chipTextActive]}>
-        {label}
-        {count != null ? ` ${count}` : ''}
-      </Text>
-    </Pressable>
-  );
-}
+const FILTER_BTN = 40;
 
 const styles = StyleSheet.create({
   container: {flex: 1},
@@ -314,8 +320,10 @@ const styles = StyleSheet.create({
     paddingTop: spacing.md,
     paddingBottom: spacing.sm,
   },
+  searchRow: {flexDirection: 'row', alignItems: 'center', gap: spacing.sm},
   input: {
-    height: 40,
+    flex: 1,
+    height: FILTER_BTN,
     borderRadius: radius.md,
     borderWidth: 1,
     borderColor: colors.border,
@@ -324,6 +332,44 @@ const styles = StyleSheet.create({
     fontSize: 15,
     color: colors.text,
   },
+  filterBtn: {
+    width: FILTER_BTN,
+    height: FILTER_BTN,
+    borderRadius: radius.md,
+    borderWidth: 1,
+    borderColor: colors.border,
+    backgroundColor: colors.surface,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  filterBtnActive: {
+    borderColor: colors.primary,
+    backgroundColor: colors.primaryTint,
+  },
+  funnel: {alignItems: 'center'},
+  funnelCone: {
+    width: 0,
+    height: 0,
+    borderLeftWidth: 7,
+    borderRightWidth: 7,
+    borderTopWidth: 8,
+    borderLeftColor: 'transparent',
+    borderRightColor: 'transparent',
+  },
+  funnelStem: {width: 2, height: 5},
+  filterBadge: {
+    position: 'absolute',
+    top: -5,
+    right: -5,
+    minWidth: 16,
+    height: 16,
+    borderRadius: 8,
+    paddingHorizontal: 3,
+    backgroundColor: colors.primary,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  filterBadgeText: {color: '#fff', fontSize: 10, fontWeight: '800'},
   center: {
     flex: 1,
     alignItems: 'center',
@@ -334,25 +380,6 @@ const styles = StyleSheet.create({
   error: {color: colors.danger, fontSize: 14, textAlign: 'center'},
   retry: {marginTop: spacing.md, padding: spacing.sm},
   retryText: {color: colors.primary, fontSize: 14, fontWeight: '600'},
-  chips: {
-    paddingHorizontal: spacing.md,
-    paddingBottom: spacing.sm,
-    gap: spacing.xs + 2,
-  },
-  chip: {
-    paddingVertical: 6,
-    paddingHorizontal: spacing.sm + 4,
-    borderRadius: 999,
-    borderWidth: 1,
-    borderColor: colors.border,
-    backgroundColor: colors.surface,
-  },
-  chipActive: {
-    backgroundColor: colors.primaryTint,
-    borderColor: colors.primary,
-  },
-  chipText: {fontSize: 12, fontWeight: '600', color: colors.textMuted},
-  chipTextActive: {color: colors.primary},
   grid: {padding: spacing.md, paddingBottom: 96, gap: GAP},
   column: {gap: GAP},
   footer: {paddingVertical: spacing.lg, alignItems: 'center'},

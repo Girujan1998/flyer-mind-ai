@@ -110,11 +110,16 @@ Extracts, **saves to the DB**, and returns a summary only:
 }
 ```
 
-### `GET /products?q=<text>&department=<aisle>&limit=20&offset=0`
+### `GET /products?q=<text>&department=&store=&status=&limit=20&offset=0`
 
 Paginated search over every stored product, newest first. Each query word must
-match the product's **name, info, category, or tags**; `department`, if given,
-filters to that one aisle (ignored if not a known department).
+match the product's **name, info, category, or tags**. `department`, `store` and
+`status` are comma-separated multi-selects that further narrow the set:
+
+- `department=laundry,frozen` — one of the fixed aisles (`src/departments.js`)
+- `store=Walmart,Food Basics` — exact store name
+- `status=valid,expired` — `valid` \| `upcoming` \| `expired` \| `unknown`,
+  computed from the flyer dates vs. the server's clock
 
 ```jsonc
 {
@@ -138,10 +143,24 @@ filters to that one aisle (ignored if not a known department).
 `width`/`height`. `thumb` is the product's crop (or `null`); `pages` holds the
 distinct full pages referenced by this result set (for the source-page view).
 
+### `GET /filters`
+
+Everything the app's filter modal offers, each list `[{ value, count }]`:
+
+```jsonc
+{
+  "departments": [{ "value": "pantry", "count": 80 }, …],
+  "stores":      [{ "value": "Walmart", "count": 432 }, …],
+  "statuses":    [{ "value": "valid", "count": 294 }, { "value": "expired", "count": 432 }]
+}
+```
+
+`statuses` omits any state no product is currently in.
+
 ### `GET /departments`
 
 `{ "departments": [{ "department": "pantry", "count": 80 }, …] }` — every aisle
-that has products, busiest first. Powers the app's filter chips.
+that has products, busiest first.
 
 ### `GET /pages/<flyerId>/<page>.jpg` · `GET /thumbs/<flyerId>/<id>.jpg`
 

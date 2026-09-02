@@ -12,6 +12,7 @@ import {
   PAGES_DIR,
   THUMBS_DIR,
   departmentCounts,
+  filterFacets,
   findFlyerByHash,
   productCountForFlyer,
   saveExtraction,
@@ -208,7 +209,9 @@ app.get('/products', (req, res) => {
     const result = searchProducts(
       {
         q: req.query.q,
-        department: req.query.department,
+        departments: req.query.department,
+        stores: req.query.store,
+        statuses: req.query.status,
         limit: req.query.limit,
         offset: req.query.offset,
       },
@@ -227,6 +230,19 @@ app.get('/departments', (_req, res) => {
     res.json({departments: departmentCounts()});
   } catch (err) {
     console.error('[departments] failed:', err);
+    res.status(500).json({error: err?.message || 'Query failed'});
+  }
+});
+
+/**
+ * GET /filters -> { departments, stores, statuses }, each [{ value, count }].
+ * Feeds the Search filter modal. `statuses` omits states no product is in.
+ */
+app.get('/filters', (_req, res) => {
+  try {
+    res.json(filterFacets());
+  } catch (err) {
+    console.error('[filters] failed:', err);
     res.status(500).json({error: err?.message || 'Query failed'});
   }
 });

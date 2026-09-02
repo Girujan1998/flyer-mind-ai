@@ -111,32 +111,59 @@ export type SearchResult = {
   hasMore: boolean;
 };
 
+/** The filters currently applied on the Search screen. */
+export type ProductFilters = {
+  departments: string[];
+  stores: string[];
+  statuses: string[];
+};
+
+export const EMPTY_FILTERS: ProductFilters = {
+  departments: [],
+  stores: [],
+  statuses: [],
+};
+
+export function countActiveFilters(f: ProductFilters): number {
+  return f.departments.length + f.stores.length + f.statuses.length;
+}
+
 /** Paginated + text search over every stored product, newest first. */
 export function searchProducts(params: {
   q?: string;
-  department?: string;
+  filters?: ProductFilters;
   limit?: number;
   offset?: number;
 }): Promise<SearchResult> {
+  const f = params.filters ?? EMPTY_FILTERS;
+  const csv = (key: string, vals: string[]) =>
+    vals.length ? `${key}=${vals.map(encodeURIComponent).join(',')}` : '';
   // RN's URLSearchParams polyfill has no `.set()`, so build the string by hand.
   const qs = [
     `limit=${params.limit ?? 20}`,
     `offset=${params.offset ?? 0}`,
     params.q ? `q=${encodeURIComponent(params.q)}` : '',
-    params.department
-      ? `department=${encodeURIComponent(params.department)}`
-      : '',
+    csv('department', f.departments),
+    csv('store', f.stores),
+    csv('status', f.statuses),
   ]
     .filter(Boolean)
     .join('&');
   return api<SearchResult>(`/products?${qs}`);
 }
 
-export type DepartmentCount = {department: string; count: number};
+/** One selectable filter value and how many products carry it. */
+export type Facet = {value: string; count: number};
 
-/** The store aisles that actually have products, busiest first. */
-export function fetchDepartments(): Promise<{departments: DepartmentCount[]}> {
-  return api<{departments: DepartmentCount[]}>('/departments');
+export type FilterFacets = {
+  departments: Facet[];
+  stores: Facet[];
+  statuses: Facet[];
+};
+
+/** Everything the filter modal offers — omits states no product is in. */
+export function fetchFilterFacets(): Promise<FilterFacets> {
+  return api<FilterFacets>('/filters');
 }
 
 const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;

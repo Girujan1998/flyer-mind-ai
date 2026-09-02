@@ -282,59 +282,96 @@ function safeJsonArray(s) {
   }
 }
 
-function buildWhere(q, department, prefix = '') {
-  const col = c => `${prefix}${c}`;
+export const STATUSES = ['valid', 'upcoming', 'expired', 'unknown'];
+
+/** Local "YYYY-MM-DD" — compared string-wise against the flyer date columns. */
+function todayIso() {
+  const d = new Date();
+  const p = n => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+}
+
+// A flyer's status relative to `?` (bound twice: today, today). Mirrors the
+// app's flyerStatus(): unknown if no dates, upcoming if the start is still
+// ahead, expired if today is past the end, else valid.
+const STATUS_CASE = `CASE
+  WHEN (f.valid_from IS NULL OR f.valid_from = '')
+   AND (f.valid_to   IS NULL OR f.valid_to   = '') THEN 'unknown'
+  WHEN f.valid_from IS NOT NULL AND f.valid_from <> '' AND f.valid_from > ? THEN 'upcoming'
+  WHEN f.valid_to   IS NOT NULL AND f.valid_to   <> '' AND ? > f.valid_to   THEN 'expired'
+  ELSE 'valid'
+END`;
+
+const toList = v =>
+  (Array.isArray(v) ? v : String(v || '').split(','))
+    .map(s => String(s).trim())
+    .filter(Boolean);
+
+// { clause, params } for the shared WHERE. Both callers JOIN flyers as `f`.
+function buildWhere({q, departments, stores, statuses}, today) {
   const conds = [];
   const params = [];
 
-  const words = String(q || '')
+  for (const w of String(q || '')
     .trim()
     .split(/\s+/)
     .filter(Boolean)
-    .slice(0, 6);
-  for (const w of words) {
+    .slice(0, 6)) {
     conds.push(
-      `(${col('name')} LIKE ? OR ${col('info')} LIKE ? OR ${col(
-        'category',
-      )} LIKE ? OR ${col('tags')} LIKE ?)`,
+      '(p.name LIKE ? OR p.info LIKE ? OR p.category LIKE ? OR p.tags LIKE ?)',
     );
     const like = `%${w}%`;
     params.push(like, like, like, like);
   }
 
-  const dep = String(department || '')
-    .trim()
-    .toLowerCase();
-  if (dep && isDepartment(dep)) {
-    conds.push(`${col('department')} = ?`);
-    params.push(dep);
+  const deps = toList(departments)
+    .map(s => s.toLowerCase())
+    .filter(isDepartment);
+  if (deps.length) {
+    conds.push(`p.department IN (${deps.map(() => '?').join(',')})`);
+    params.push(...deps);
   }
 
-  return {
-    clause: conds.length ? `WHERE ${conds.join(' AND ')}` : '',
-    params,
-  };
+  const sts = toList(stores);
+  if (sts.length) {
+    conds.push(`f.store IN (${sts.map(() => '?').join(',')})`);
+    params.push(...sts);
+  }
+
+  const stz = toList(statuses).filter(s => STATUSES.includes(s));
+  if (stz.length && stz.length < STATUSES.length) {
+    conds.push(`(${STATUS_CASE}) IN (${stz.map(() => '?').join(',')})`);
+    params.push(today, today, ...stz);
+  }
+
+  return {clause: conds.length ? `WHERE ${conds.join(' AND ')}` : '', params};
 }
 
 /**
- * Paginated + text search over all stored products, newest first.
- * `q` matches name/info/category/tags; `department` filters to one aisle.
+ * Paginated search over all stored products, newest first.
+ * `q` matches name/info/category/tags; `departments` / `stores` / `statuses`
+ * are optional arrays (or comma strings) that further narrow the set.
  * `baseUrl` is `http://<host>` — used to build page + thumbnail URLs.
  * Returns { products, pages, total, hasMore }.
  */
 export function searchProducts(
-  {q = '', department = '', limit = 20, offset = 0},
+  {q = '', departments, stores, statuses, limit = 20, offset = 0},
   baseUrl,
 ) {
   const lim = Math.max(1, Math.min(100, Number(limit) || 20));
   const off = Math.max(0, Number(offset) || 0);
+  const today = todayIso();
 
-  const flat = buildWhere(q, department);
+  const {clause, params} = buildWhere({q, departments, stores, statuses}, today);
+
   const total = db
-    .prepare(`SELECT COUNT(*) AS n FROM products ${flat.clause}`)
-    .get(...flat.params).n;
+    .prepare(
+      `SELECT COUNT(*) AS n
+         FROM products p JOIN flyers f ON f.id = p.flyer_id
+         ${clause}`,
+    )
+    .get(...params).n;
 
-  const {clause, params} = buildWhere(q, department, 'p.');
   const rows = db
     .prepare(
       `SELECT p.id, p.flyer_id, p.page, p.name, p.price, p.price_value, p.info,
@@ -395,4 +432,45 @@ export function searchProducts(
 
 export function totalProducts() {
   return stmts.countProducts.get().n;
+}
+
+/**
+ * Everything the Search filter modal needs, each list `[{ value, count }]`:
+ *   { departments, stores, statuses }
+ * `statuses` only lists a state that some product is actually in right now.
+ */
+export function filterFacets() {
+  const today = todayIso();
+
+  const departments = stmts.departmentCounts
+    .all()
+    .map(r => ({value: r.department, count: r.n}));
+
+  const stores = db
+    .prepare(
+      `SELECT f.store AS value, COUNT(*) AS n
+         FROM products p JOIN flyers f ON f.id = p.flyer_id
+        WHERE f.store IS NOT NULL AND f.store <> ''
+        GROUP BY f.store
+        ORDER BY n DESC`,
+    )
+    .all()
+    .map(r => ({value: r.value, count: r.n}));
+
+  const byStatus = new Map(
+    db
+      .prepare(
+        `SELECT ${STATUS_CASE} AS status, COUNT(*) AS n
+           FROM products p JOIN flyers f ON f.id = p.flyer_id
+          GROUP BY status`,
+      )
+      .all(today, today)
+      .map(r => [r.status, r.n]),
+  );
+  const statuses = STATUSES.filter(s => byStatus.get(s)).map(s => ({
+    value: s,
+    count: byStatus.get(s),
+  }));
+
+  return {departments, stores, statuses};
 }
