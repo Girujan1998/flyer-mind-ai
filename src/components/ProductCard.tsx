@@ -228,11 +228,14 @@ const makeStyles = (c: Palette) =>
       height: 3,
     },
     store: {
+      alignSelf: 'flex-end',
+      marginTop: 2,
       color: c.textMuted,
       fontSize: 10,
       fontWeight: '600',
       textTransform: 'uppercase',
       letterSpacing: 0.4,
+      textAlign: 'right',
     },
   });
 
