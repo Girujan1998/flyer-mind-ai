@@ -36,12 +36,28 @@ function lanAddress() {
 }
 
 const PORT = process.env.PORT || 3001;
-const MAX_UPLOAD_BYTES = 40 * 1024 * 1024;
+const MAX_UPLOAD_MB = Number(process.env.MAX_UPLOAD_MB) || 100;
+const MAX_UPLOAD_BYTES = MAX_UPLOAD_MB * 1024 * 1024;
 
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: {fileSize: MAX_UPLOAD_BYTES},
 });
+
+// Turn multer's size/field errors into a readable 4xx instead of a bare 500.
+function handleUpload(req, res, next) {
+  upload.single('file')(req, res, err => {
+    if (!err) {
+      return next();
+    }
+    if (err.code === 'LIMIT_FILE_SIZE') {
+      return res.status(413).json({
+        error: `That PDF is larger than the ${MAX_UPLOAD_MB} MB limit. Split it or lower its resolution, or raise MAX_UPLOAD_MB on the server.`,
+      });
+    }
+    return res.status(400).json({error: err.message || 'Upload failed'});
+  });
+}
 
 const app = express();
 app.use(cors());
@@ -155,7 +171,7 @@ async function runExtraction({buffer, name, hash, rendered, maxPages}) {
  * Re-posting the same PDF is safe: if it finished it returns the stored summary
  * (`reused: true`); if it's still running the request waits on that same job.
  */
-app.post('/flyers/extract', upload.single('file'), async (req, res) => {
+app.post('/flyers/extract', handleUpload, async (req, res) => {
   try {
     if (!req.file) {
       return res

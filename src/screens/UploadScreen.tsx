@@ -16,6 +16,7 @@ import {
   extractFlyer,
   formatValidity,
 } from '../api/extract';
+import {MAX_UPLOAD_MB} from '../config';
 import {colors, radius, spacing} from '../theme';
 
 type Phase =
@@ -67,10 +68,21 @@ function UploadScreen(): React.JSX.Element {
         type: [types.pdf],
         copyTo: 'cachesDirectory',
       });
+      const size = res.size ?? undefined;
+      if (size != null && size > MAX_UPLOAD_MB * 1024 * 1024) {
+        setFile(null);
+        setPhase({
+          kind: 'error',
+          message: `That PDF is ${formatBytes(
+            size,
+          )} — larger than the ${MAX_UPLOAD_MB} MB limit. Split it or lower its resolution first.`,
+        });
+        return;
+      }
       setFile({
         uri: res.fileCopyUri ?? res.uri,
         name: res.name ?? 'flyer.pdf',
-        size: res.size ?? undefined,
+        size,
         mimeType: res.type ?? 'application/pdf',
       });
       setPhase({kind: 'idle'});

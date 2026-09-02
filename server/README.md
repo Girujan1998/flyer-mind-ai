@@ -201,6 +201,7 @@ The rendered page image and per-product crop (static files).
 | `GEMINI_API_KEY` | — | Required. `MOCK` for canned data. |
 | `GEMINI_MODEL` | `gemini-3.1-flash-lite` | Any vision-capable Gemini model. |
 | `PAGES_PER_REQUEST` | `1` | Pages per Gemini call, clamped 1–4. Above 3 recall drops. |
+| `MAX_UPLOAD_MB` | `100` | Largest flyer PDF accepted. Held in memory — keep in sync with `MAX_UPLOAD_MB` in the app's `src/config.ts`. |
 | `PORT` | `3001` | Must match `LAN_HOST`/`PORT` in the app's `src/config.ts`. |
 
 Per-run token usage is logged to the console and appended to
