@@ -13,4 +13,4 @@ const PORT = 3001;
 export const API_BASE_URL = `http://${LAN_HOST}:${PORT}`;
 
 /** Largest flyer PDF the server accepts — keep in sync with MAX_UPLOAD_MB there. */
-export const MAX_UPLOAD_MB = 100;
+export const MAX_UPLOAD_MB = 50;

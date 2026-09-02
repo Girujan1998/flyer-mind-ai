@@ -36,7 +36,7 @@ function lanAddress() {
 }
 
 const PORT = process.env.PORT || 3001;
-const MAX_UPLOAD_MB = Number(process.env.MAX_UPLOAD_MB) || 100;
+const MAX_UPLOAD_MB = Number(process.env.MAX_UPLOAD_MB) || 50;
 const MAX_UPLOAD_BYTES = MAX_UPLOAD_MB * 1024 * 1024;
 
 const upload = multer({
