@@ -11,7 +11,7 @@ import {
 } from 'react-native';
 
 import {boxToRect, FlyerPage, Product} from '../api/extract';
-import {colors, radius, spacing} from '../theme';
+import {Palette, fonts, radius, spacing, useThemedStyles} from '../theme';
 
 type Props = {
   product: Product | null;
@@ -21,6 +21,7 @@ type Props = {
 
 /** Full flyer page with the product's detected region outlined. */
 function SourcePageModal({product, page, onClose}: Props): React.JSX.Element {
+  const {styles} = useThemedStyles(makeStyles);
   const visible = product != null && page != null;
 
   return (
@@ -65,6 +66,7 @@ function PageWithBox({
   product: Product;
   page: FlyerPage;
 }): React.JSX.Element {
+  const {styles} = useThemedStyles(makeStyles);
   const displayWidth = Dimensions.get('window').width - spacing.md * 2;
   const displayHeight = displayWidth * (page.height / page.width);
   const rect = boxToRect(product.box, page.width, page.height);
@@ -99,59 +101,71 @@ function PageWithBox({
   );
 }
 
-const styles = StyleSheet.create({
-  backdrop: {
-    flex: 1,
-    backgroundColor: 'rgba(0,0,0,0.5)',
-    justifyContent: 'flex-end',
-  },
-  sheet: {
-    backgroundColor: colors.background,
-    borderTopLeftRadius: radius.lg,
-    borderTopRightRadius: radius.lg,
-    paddingHorizontal: spacing.md,
-    paddingTop: spacing.md,
-    maxHeight: '92%',
-  },
-  header: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    gap: spacing.md,
-    paddingBottom: spacing.md,
-  },
-  headerText: {
-    flex: 1,
-    flexDirection: 'row',
-    alignItems: 'baseline',
-    gap: spacing.sm,
-  },
-  name: {color: colors.text, fontSize: 16, fontWeight: '700', flexShrink: 1},
-  price: {color: colors.primary, fontSize: 15, fontWeight: '700'},
-  close: {
-    width: 24,
-    height: 24,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  closeBar: {
-    position: 'absolute',
-    width: 18,
-    height: 2,
-    borderRadius: 1,
-    backgroundColor: colors.textMuted,
-  },
-  closeBarA: {transform: [{rotate: '45deg'}]},
-  closeBarB: {transform: [{rotate: '-45deg'}]},
-  stage: {alignSelf: 'stretch'},
-  stageContent: {paddingBottom: spacing.xl},
-  outline: {
-    position: 'absolute',
-    borderWidth: 2,
-    borderColor: colors.primary,
-    borderRadius: 4,
-    backgroundColor: colors.primaryTint,
-  },
-});
+const makeStyles = (c: Palette) =>
+  StyleSheet.create({
+    backdrop: {
+      flex: 1,
+      backgroundColor: c.scrim,
+      justifyContent: 'flex-end',
+    },
+    sheet: {
+      backgroundColor: c.surface,
+      borderTopLeftRadius: radius.lg,
+      borderTopRightRadius: radius.lg,
+      paddingHorizontal: spacing.md,
+      paddingTop: spacing.md,
+      maxHeight: '92%',
+    },
+    header: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+      gap: spacing.md,
+      paddingBottom: spacing.md,
+    },
+    headerText: {
+      flex: 1,
+      flexDirection: 'row',
+      alignItems: 'baseline',
+      gap: spacing.sm,
+    },
+    name: {
+      color: c.text,
+      fontFamily: fonts.display,
+      fontSize: 16,
+      fontWeight: '700',
+      flexShrink: 1,
+    },
+    price: {
+      color: c.primary,
+      fontFamily: fonts.display,
+      fontSize: 15,
+      fontWeight: '700',
+    },
+    close: {
+      width: 24,
+      height: 24,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    closeBar: {
+      position: 'absolute',
+      width: 18,
+      height: 2,
+      borderRadius: 1,
+      backgroundColor: c.textMuted,
+    },
+    closeBarA: {transform: [{rotate: '45deg'}]},
+    closeBarB: {transform: [{rotate: '-45deg'}]},
+    stage: {alignSelf: 'stretch'},
+    stageContent: {paddingBottom: spacing.xl},
+    outline: {
+      position: 'absolute',
+      borderWidth: 2,
+      borderColor: c.primary,
+      borderRadius: 4,
+      backgroundColor: c.primaryTint,
+    },
+  });
 
 export default SourcePageModal;

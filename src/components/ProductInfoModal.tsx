@@ -10,7 +10,7 @@ import {
 } from 'react-native';
 
 import {Product, flyerStatus, formatValidity} from '../api/extract';
-import {colors, radius, spacing} from '../theme';
+import {Palette, fonts, radius, spacing, useThemedStyles} from '../theme';
 import FlyerStatusPill from './FlyerStatusPill';
 
 type Props = {
@@ -26,6 +26,8 @@ function ProductInfoModal({
   onClose,
   onViewInFlyer,
 }: Props): React.JSX.Element {
+  const {styles} = useThemedStyles(makeStyles);
+
   const status = product
     ? flyerStatus(product.validFrom, product.validTo)
     : 'unknown';
@@ -79,7 +81,13 @@ function ProductInfoModal({
                 ) : null}
                 <View style={styles.priceRow}>
                   {product.price ? (
-                    <Text style={styles.price}>{product.price}</Text>
+                    <Text
+                      style={[
+                        styles.price,
+                        product.onSale && styles.priceDeal,
+                      ]}>
+                      {product.price}
+                    </Text>
                   ) : null}
                   {product.wasPrice ? (
                     <Text style={styles.wasPrice}>{product.wasPrice}</Text>
@@ -142,119 +150,147 @@ function ProductInfoModal({
   );
 }
 
-const styles = StyleSheet.create({
-  backdrop: {
-    flex: 1,
-    backgroundColor: 'rgba(0,0,0,0.5)',
-    justifyContent: 'flex-end',
-  },
-  backdropFill: {flex: 1},
-  sheet: {
-    backgroundColor: colors.background,
-    borderTopLeftRadius: radius.lg,
-    borderTopRightRadius: radius.lg,
-    overflow: 'hidden',
-    maxHeight: '92%',
-  },
-  hero: {
-    height: 200,
-    backgroundColor: '#fff',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  heroImage: {width: '100%', height: '100%'},
-  noImage: {color: colors.textMuted, fontSize: 13},
-  statusPill: {position: 'absolute', top: spacing.sm, left: spacing.sm},
-  close: {
-    position: 'absolute',
-    top: spacing.sm,
-    right: spacing.sm,
-    width: 28,
-    height: 28,
-    borderRadius: 14,
-    backgroundColor: 'rgba(255,255,255,0.9)',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  closeBar: {
-    position: 'absolute',
-    width: 14,
-    height: 2,
-    borderRadius: 1,
-    backgroundColor: colors.text,
-  },
-  closeBarA: {transform: [{rotate: '45deg'}]},
-  closeBarB: {transform: [{rotate: '-45deg'}]},
-  body: {alignSelf: 'stretch'},
-  bodyContent: {
-    padding: spacing.md,
-    paddingBottom: spacing.xl,
-    gap: spacing.xs,
-  },
-  name: {color: colors.text, fontSize: 18, fontWeight: '700', lineHeight: 24},
-  category: {
-    color: colors.textMuted,
-    fontSize: 12,
-    fontWeight: '600',
-    textTransform: 'capitalize',
-    letterSpacing: 0.3,
-  },
-  priceRow: {flexDirection: 'row', alignItems: 'center', gap: spacing.sm},
-  price: {color: colors.primary, fontSize: 22, fontWeight: '800'},
-  wasPrice: {
-    color: colors.textMuted,
-    fontSize: 15,
-    textDecorationLine: 'line-through',
-  },
-  salePill: {
-    paddingVertical: 2,
-    paddingHorizontal: 7,
-    borderRadius: 4,
-    backgroundColor: colors.danger,
-  },
-  saleText: {
-    color: '#fff',
-    fontSize: 11,
-    fontWeight: '800',
-    letterSpacing: 0.5,
-  },
-  promo: {color: colors.danger, fontSize: 13, fontWeight: '700'},
-  details: {
-    color: colors.textMuted,
-    fontSize: 13,
-    lineHeight: 19,
-    marginTop: spacing.xs,
-  },
-  meta: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    marginTop: spacing.md,
-    paddingTop: spacing.md,
-    borderTopWidth: 1,
-    borderTopColor: colors.border,
-    rowGap: spacing.md,
-  },
-  metaCell: {width: '50%', gap: 3},
-  metaCellFull: {width: '100%', gap: 3},
-  metaKey: {
-    color: colors.textMuted,
-    fontSize: 10,
-    fontWeight: '700',
-    letterSpacing: 0.6,
-    textTransform: 'uppercase',
-  },
-  metaValue: {color: colors.text, fontSize: 14, fontWeight: '600'},
-  metaCapitalize: {textTransform: 'capitalize'},
-  cta: {
-    marginTop: spacing.lg,
-    minHeight: 48,
-    borderRadius: radius.md,
-    backgroundColor: colors.primary,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  ctaPressed: {opacity: 0.8},
-  ctaText: {color: '#fff', fontSize: 15, fontWeight: '700'},
-});
+const makeStyles = (c: Palette) =>
+  StyleSheet.create({
+    backdrop: {
+      flex: 1,
+      backgroundColor: c.scrim,
+      justifyContent: 'flex-end',
+    },
+    backdropFill: {flex: 1},
+    sheet: {
+      backgroundColor: c.surface,
+      borderTopLeftRadius: radius.lg,
+      borderTopRightRadius: radius.lg,
+      overflow: 'hidden',
+      maxHeight: '92%',
+    },
+    hero: {
+      height: 200,
+      backgroundColor: c.imageBackdrop,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    heroImage: {width: '100%', height: '100%'},
+    noImage: {color: c.textMuted, fontSize: 13},
+    statusPill: {position: 'absolute', top: spacing.sm, left: spacing.sm},
+    close: {
+      position: 'absolute',
+      top: spacing.sm,
+      right: spacing.sm,
+      width: 28,
+      height: 28,
+      borderRadius: 14,
+      backgroundColor: 'rgba(255,255,255,0.9)',
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    closeBar: {
+      position: 'absolute',
+      width: 14,
+      height: 2,
+      borderRadius: 1,
+      backgroundColor: '#262420',
+    },
+    closeBarA: {transform: [{rotate: '45deg'}]},
+    closeBarB: {transform: [{rotate: '-45deg'}]},
+    body: {alignSelf: 'stretch'},
+    bodyContent: {
+      padding: spacing.md,
+      paddingBottom: spacing.xl,
+      gap: spacing.xs,
+    },
+    name: {
+      color: c.text,
+      fontFamily: fonts.display,
+      fontSize: 18,
+      fontWeight: '700',
+      lineHeight: 24,
+    },
+    category: {
+      color: c.textMuted,
+      fontSize: 12,
+      fontWeight: '600',
+      textTransform: 'capitalize',
+      letterSpacing: 0.3,
+    },
+    priceRow: {flexDirection: 'row', alignItems: 'center', gap: spacing.sm},
+    price: {
+      color: c.primary,
+      fontFamily: fonts.display,
+      fontSize: 22,
+      fontWeight: '800',
+    },
+    priceDeal: {color: c.deal},
+    wasPrice: {
+      color: c.textMuted,
+      fontSize: 15,
+      textDecorationLine: 'line-through',
+    },
+    salePill: {
+      paddingVertical: 3,
+      paddingHorizontal: 9,
+      borderRadius: 999,
+      backgroundColor: c.deal,
+    },
+    saleText: {
+      color: '#fff',
+      fontSize: 11,
+      fontWeight: '800',
+      letterSpacing: 0.5,
+    },
+    promo: {
+      color: c.deal,
+      fontFamily: fonts.bold,
+      fontSize: 13,
+      fontWeight: '700',
+    },
+    details: {
+      color: c.textMuted,
+      fontSize: 13,
+      lineHeight: 19,
+      marginTop: spacing.xs,
+    },
+    meta: {
+      flexDirection: 'row',
+      flexWrap: 'wrap',
+      marginTop: spacing.md,
+      paddingTop: spacing.md,
+      borderTopWidth: 1,
+      borderTopColor: c.border,
+      rowGap: spacing.md,
+    },
+    metaCell: {width: '50%', gap: 3},
+    metaCellFull: {width: '100%', gap: 3},
+    metaKey: {
+      color: c.textMuted,
+      fontSize: 10,
+      fontWeight: '700',
+      letterSpacing: 0.6,
+      textTransform: 'uppercase',
+    },
+    metaValue: {
+      color: c.text,
+      fontFamily: fonts.semibold,
+      fontSize: 14,
+      fontWeight: '600',
+    },
+    metaCapitalize: {textTransform: 'capitalize'},
+    cta: {
+      marginTop: spacing.lg,
+      minHeight: 48,
+      borderRadius: radius.md,
+      backgroundColor: c.primary,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    ctaPressed: {opacity: 0.85},
+    ctaText: {
+      color: c.onPrimary,
+      fontFamily: fonts.bold,
+      fontSize: 15,
+      fontWeight: '700',
+    },
+  });
 
 export default ProductInfoModal;

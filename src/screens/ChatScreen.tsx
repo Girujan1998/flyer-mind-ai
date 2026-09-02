@@ -1,7 +1,10 @@
 import React from 'react';
 import {StyleSheet, Text, View} from 'react-native';
 
+import {Palette, fonts, spacing, useThemedStyles} from '../theme';
+
 function ChatScreen(): React.JSX.Element {
+  const {styles} = useThemedStyles(makeStyles);
   return (
     <View style={styles.container}>
       <Text style={styles.title}>Chat</Text>
@@ -10,24 +13,27 @@ function ChatScreen(): React.JSX.Element {
   );
 }
 
-const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    alignItems: 'center',
-    justifyContent: 'center',
-    paddingHorizontal: 24,
-    paddingBottom: 96,
-  },
-  title: {
-    fontSize: 24,
-    fontWeight: '700',
-    color: '#111',
-  },
-  subtitle: {
-    marginTop: 8,
-    fontSize: 15,
-    color: '#666',
-  },
-});
+const makeStyles = (c: Palette) =>
+  StyleSheet.create({
+    container: {
+      flex: 1,
+      backgroundColor: c.background,
+      alignItems: 'center',
+      justifyContent: 'center',
+      paddingHorizontal: spacing.lg,
+      paddingBottom: 96,
+    },
+    title: {
+      fontFamily: fonts.display,
+      fontSize: 24,
+      fontWeight: '700',
+      color: c.text,
+    },
+    subtitle: {
+      marginTop: spacing.sm,
+      fontSize: 15,
+      color: c.textMuted,
+    },
+  });
 
 export default ChatScreen;

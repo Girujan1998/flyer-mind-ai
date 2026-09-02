@@ -9,16 +9,17 @@ import {
   View,
 } from 'react-native';
 
+import {Palette, fonts, useThemedStyles} from '../theme';
+
 export type TabKey = 'upload' | 'search' | 'chat';
 
-const ACCENT = '#4285f4';
-const MUTED = '#5f6368';
 const BAR_PADDING = 6;
 const ITEM_HEIGHT = 44;
 
 type IconProps = {color: string};
 
 function UploadIcon({color}: IconProps): React.JSX.Element {
+  const {styles} = useThemedStyles(makeStyles);
   return (
     <View style={styles.icon}>
       <View style={[styles.arrowHead, {borderBottomColor: color}]} />
@@ -29,6 +30,7 @@ function UploadIcon({color}: IconProps): React.JSX.Element {
 }
 
 function SearchIcon({color}: IconProps): React.JSX.Element {
+  const {styles} = useThemedStyles(makeStyles);
   return (
     <View style={styles.icon}>
       <View style={[styles.lens, {borderColor: color}]} />
@@ -38,6 +40,7 @@ function SearchIcon({color}: IconProps): React.JSX.Element {
 }
 
 function ChatIcon({color}: IconProps): React.JSX.Element {
+  const {styles} = useThemedStyles(makeStyles);
   return (
     <View style={styles.icon}>
       <View style={[styles.bubble, {borderColor: color}]} />
@@ -64,6 +67,8 @@ type Props = {
 };
 
 function PillNavBar({activeTab, onTabPress}: Props): React.JSX.Element {
+  const {styles, colors} = useThemedStyles(makeStyles);
+
   // Measured frame of each tab within the bar — the highlight springs to
   // whichever one is active. Re-measured whenever a tab grows/shrinks
   // (a label mounting/unmounting changes its width).
@@ -161,7 +166,9 @@ function PillNavBar({activeTab, onTabPress}: Props): React.JSX.Element {
                 onPress={() => onTabPress(key)}
                 onLayout={onTabLayout(key)}
                 style={styles.item}>
-                <Icon color={active ? ACCENT : MUTED} />
+                <Icon
+                  color={active ? colors.navActiveText : colors.navInactive}
+                />
                 {active ? <Text style={styles.label}>{label}</Text> : null}
               </TouchableOpacity>
             );
@@ -172,109 +179,111 @@ function PillNavBar({activeTab, onTabPress}: Props): React.JSX.Element {
   );
 }
 
-const styles = StyleSheet.create({
-  wrap: {
-    position: 'absolute',
-    left: 0,
-    right: 0,
-    bottom: 28,
-    alignItems: 'center',
-  },
-  bar: {
-    padding: BAR_PADDING,
-    borderRadius: 28,
-    backgroundColor: '#fff',
-    borderWidth: StyleSheet.hairlineWidth,
-    borderColor: '#e0e0e0',
-    shadowColor: '#000',
-    shadowOffset: {width: 0, height: 6},
-    shadowOpacity: 0.14,
-    shadowRadius: 14,
-    elevation: 10,
-  },
-  track: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 4,
-  },
-  highlight: {
-    position: 'absolute',
-    left: 0,
-    top: 0,
-    height: ITEM_HEIGHT,
-    borderRadius: 22,
-    backgroundColor: 'rgba(66, 133, 244, 0.12)',
-  },
-  item: {
-    minHeight: ITEM_HEIGHT,
-    paddingHorizontal: 16,
-    borderRadius: 22,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 8,
-  },
-  label: {
-    color: ACCENT,
-    fontSize: 13,
-    fontWeight: '600',
-  },
-  icon: {
-    width: 22,
-    height: 22,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  arrowHead: {
-    width: 0,
-    height: 0,
-    borderLeftWidth: 5,
-    borderRightWidth: 5,
-    borderBottomWidth: 7,
-    borderLeftColor: 'transparent',
-    borderRightColor: 'transparent',
-  },
-  arrowStem: {
-    width: 2.5,
-    height: 7,
-  },
-  arrowBase: {
-    width: 14,
-    height: 2.5,
-    borderRadius: 1,
-    marginTop: 2,
-  },
-  lens: {
-    width: 13,
-    height: 13,
-    borderRadius: 7,
-    borderWidth: 2,
-  },
-  handle: {
-    position: 'absolute',
-    right: 2,
-    bottom: 2,
-    width: 6,
-    height: 2,
-    borderRadius: 1,
-    transform: [{rotate: '45deg'}],
-  },
-  bubble: {
-    width: 18,
-    height: 14,
-    borderRadius: 5,
-    borderWidth: 2,
-  },
-  bubbleTail: {
-    position: 'absolute',
-    left: 4,
-    bottom: 1,
-    width: 5,
-    height: 5,
-    borderLeftWidth: 2,
-    borderBottomWidth: 2,
-    transform: [{rotate: '45deg'}],
-  },
-});
+const makeStyles = (c: Palette) =>
+  StyleSheet.create({
+    wrap: {
+      position: 'absolute',
+      left: 0,
+      right: 0,
+      bottom: 28,
+      alignItems: 'center',
+    },
+    bar: {
+      padding: BAR_PADDING,
+      borderRadius: 28,
+      backgroundColor: c.navBackground,
+      borderWidth: StyleSheet.hairlineWidth,
+      borderColor: c.navBorder,
+      shadowColor: '#000',
+      shadowOffset: {width: 0, height: 6},
+      shadowOpacity: 0.22,
+      shadowRadius: 16,
+      elevation: 10,
+    },
+    track: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 4,
+    },
+    highlight: {
+      position: 'absolute',
+      left: 0,
+      top: 0,
+      height: ITEM_HEIGHT,
+      borderRadius: 22,
+      backgroundColor: c.primary,
+    },
+    item: {
+      minHeight: ITEM_HEIGHT,
+      paddingHorizontal: 16,
+      borderRadius: 22,
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'center',
+      gap: 8,
+    },
+    label: {
+      color: c.navActiveText,
+      fontFamily: fonts.bold,
+      fontSize: 13,
+      fontWeight: '700',
+    },
+    icon: {
+      width: 22,
+      height: 22,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    arrowHead: {
+      width: 0,
+      height: 0,
+      borderLeftWidth: 5,
+      borderRightWidth: 5,
+      borderBottomWidth: 7,
+      borderLeftColor: 'transparent',
+      borderRightColor: 'transparent',
+    },
+    arrowStem: {
+      width: 2.5,
+      height: 7,
+    },
+    arrowBase: {
+      width: 14,
+      height: 2.5,
+      borderRadius: 1,
+      marginTop: 2,
+    },
+    lens: {
+      width: 13,
+      height: 13,
+      borderRadius: 7,
+      borderWidth: 2,
+    },
+    handle: {
+      position: 'absolute',
+      right: 2,
+      bottom: 2,
+      width: 6,
+      height: 2,
+      borderRadius: 1,
+      transform: [{rotate: '45deg'}],
+    },
+    bubble: {
+      width: 18,
+      height: 14,
+      borderRadius: 5,
+      borderWidth: 2,
+    },
+    bubbleTail: {
+      position: 'absolute',
+      left: 4,
+      bottom: 1,
+      width: 5,
+      height: 5,
+      borderLeftWidth: 2,
+      borderBottomWidth: 2,
+      transform: [{rotate: '45deg'}],
+    },
+  });
 
 export default PillNavBar;

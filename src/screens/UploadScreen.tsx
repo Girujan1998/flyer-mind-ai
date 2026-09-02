@@ -17,7 +17,8 @@ import {
   formatValidity,
 } from '../api/extract';
 import {MAX_UPLOAD_MB} from '../config';
-import {colors, radius, spacing} from '../theme';
+import ScreenHeader from '../components/ScreenHeader';
+import {Palette, fonts, radius, spacing, useThemedStyles} from '../theme';
 
 type Phase =
   | {kind: 'idle'}
@@ -57,6 +58,7 @@ function formatBytes(bytes: number): string {
 }
 
 function UploadScreen(): React.JSX.Element {
+  const {styles, colors} = useThemedStyles(makeStyles);
   const [file, setFile] = useState<SelectedPdf | null>(null);
   const [phase, setPhase] = useState<Phase>({kind: 'idle'});
   const abortRef = useRef<AbortController | null>(null);
@@ -167,194 +169,210 @@ function UploadScreen(): React.JSX.Element {
     const validity = formatValidity(validFrom, validTo);
     return (
       <View style={styles.container}>
-        <View style={styles.doneCard}>
-          <Text style={styles.check}>✓</Text>
-          <Text style={styles.doneTitle}>
-            {reused ? 'Already extracted' : 'Saved'}
-          </Text>
-          {store ? <Text style={styles.doneStore}>{store}</Text> : null}
-          {validity ? (
-            <Text style={styles.doneValidity}>Prices valid {validity}</Text>
-          ) : null}
-          <Text style={styles.doneBody}>
-            {savedProducts} product{savedProducts === 1 ? '' : 's'} from {name}
-            {'\n'}
-            {renderedPages} page{renderedPages === 1 ? '' : 's'}
-            {failedPages.length > 0
-              ? ` · couldn't read ${failedPages.length}`
-              : ''}
-          </Text>
-          <Text style={styles.hint}>Browse them on the Search tab.</Text>
+        <ScreenHeader title="Add a flyer" />
+        <View style={styles.form}>
+          <View style={styles.doneCard}>
+            <Text style={styles.check}>✓</Text>
+            <Text style={styles.doneTitle}>
+              {reused ? 'Already extracted' : 'Saved'}
+            </Text>
+            {store ? <Text style={styles.doneStore}>{store}</Text> : null}
+            {validity ? (
+              <Text style={styles.doneValidity}>Prices valid {validity}</Text>
+            ) : null}
+            <Text style={styles.doneBody}>
+              {savedProducts} product{savedProducts === 1 ? '' : 's'} from{' '}
+              {name}
+              {'\n'}
+              {renderedPages} page{renderedPages === 1 ? '' : 's'}
+              {failedPages.length > 0
+                ? ` · couldn't read ${failedPages.length}`
+                : ''}
+            </Text>
+            <Text style={styles.hint}>Browse them on the Search tab.</Text>
+          </View>
+          <Pressable
+            onPress={() => setPhase({kind: 'idle'})}
+            style={({pressed}) => [
+              styles.btn,
+              styles.btnGhost,
+              pressed && styles.pressed,
+            ]}>
+            <Text style={styles.btnGhostText}>Upload another</Text>
+          </Pressable>
         </View>
-        <Pressable
-          onPress={() => setPhase({kind: 'idle'})}
-          style={({pressed}) => [
-            styles.btn,
-            styles.btnGhost,
-            pressed && styles.pressed,
-          ]}>
-          <Text style={styles.btnGhostText}>Upload another</Text>
-        </Pressable>
       </View>
     );
   }
 
   return (
     <View style={styles.container}>
-      <Text style={styles.title}>Upload</Text>
-      <Text style={styles.subtitle}>
-        Add a flyer PDF from your device. Its products, prices and bounding
-        boxes are extracted and saved — find them on Search.
-      </Text>
-
-      <View style={styles.fileBox}>
-        <Text style={styles.fileName} numberOfLines={1}>
-          {file ? file.name : 'No PDF selected'}
+      <ScreenHeader title="Add a flyer" />
+      <View style={styles.form}>
+        <Text style={styles.subtitle}>
+          Drop a flyer PDF from your phone. Its products, prices and deal tags
+          are pulled out and filed under Search.
         </Text>
-        {file?.size != null ? (
-          <Text style={styles.fileMeta}>{formatBytes(file.size)}</Text>
-        ) : null}
-      </View>
 
-      <Pressable
-        onPress={selectPdf}
-        disabled={working}
-        style={({pressed}) => [
-          styles.btn,
-          styles.btnGhost,
-          working && styles.btnDisabled,
-          pressed && styles.pressed,
-        ]}>
-        <Text style={styles.btnGhostText}>Select PDF</Text>
-      </Pressable>
+        <View style={styles.fileBox}>
+          <Text style={styles.fileName} numberOfLines={1}>
+            {file ? file.name : 'No PDF selected'}
+          </Text>
+          {file?.size != null ? (
+            <Text style={styles.fileMeta}>{formatBytes(file.size)}</Text>
+          ) : null}
+        </View>
 
-      {working ? (
-        <>
-          <View style={styles.uploadingRow}>
-            <ActivityIndicator color={colors.primary} />
-            <Text style={styles.uploadingText}>
-              {phase.kind === 'reconnecting'
-                ? `Connection dropped — reconnecting. Your flyer is still being processed on the server${
-                    phase.attempt > 1 ? ` (attempt ${phase.attempt})` : ''
-                  }.`
-                : 'Extracting products… this keeps running if you switch tabs or leave the app.'}
-            </Text>
-          </View>
-          <Pressable
-            onPress={stopUpload}
-            style={({pressed}) => [
-              styles.btn,
-              styles.btnStop,
-              pressed && styles.pressed,
-            ]}>
-            <Text style={styles.btnStopText}>Stop upload</Text>
-          </Pressable>
-        </>
-      ) : (
         <Pressable
-          onPress={upload}
-          disabled={!file}
+          onPress={selectPdf}
+          disabled={working}
           style={({pressed}) => [
             styles.btn,
-            styles.btnPrimary,
-            !file && styles.btnDisabled,
+            styles.btnGhost,
+            working && styles.btnDisabled,
             pressed && styles.pressed,
           ]}>
-          <Text style={styles.btnPrimaryText}>Upload flyer</Text>
+          <Text style={styles.btnGhostText}>Select PDF</Text>
         </Pressable>
-      )}
 
-      {phase.kind === 'error' ? (
-        <Text style={styles.error}>{phase.message}</Text>
-      ) : null}
+        {working ? (
+          <>
+            <View style={styles.uploadingRow}>
+              <ActivityIndicator color={colors.primary} />
+              <Text style={styles.uploadingText}>
+                {phase.kind === 'reconnecting'
+                  ? `Connection dropped — reconnecting. Your flyer is still being processed on the server${
+                      phase.attempt > 1 ? ` (attempt ${phase.attempt})` : ''
+                    }.`
+                  : 'Extracting products… this keeps running if you switch tabs or leave the app.'}
+              </Text>
+            </View>
+            <Pressable
+              onPress={stopUpload}
+              style={({pressed}) => [
+                styles.btn,
+                styles.btnStop,
+                pressed && styles.pressed,
+              ]}>
+              <Text style={styles.btnStopText}>Stop upload</Text>
+            </Pressable>
+          </>
+        ) : (
+          <Pressable
+            onPress={upload}
+            disabled={!file}
+            style={({pressed}) => [
+              styles.btn,
+              styles.btnPrimary,
+              !file && styles.btnDisabled,
+              pressed && styles.pressed,
+            ]}>
+            <Text style={styles.btnPrimaryText}>Upload flyer</Text>
+          </Pressable>
+        )}
+
+        {phase.kind === 'error' ? (
+          <Text style={styles.error}>{phase.message}</Text>
+        ) : null}
+      </View>
     </View>
   );
 }
 
-const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    paddingHorizontal: spacing.md,
-    paddingTop: spacing.xl,
-    gap: spacing.md,
-  },
-  title: {fontSize: 24, fontWeight: '700', color: colors.text},
-  subtitle: {fontSize: 15, color: colors.textMuted, lineHeight: 21},
-  fileBox: {
-    backgroundColor: colors.surface,
-    borderWidth: 1,
-    borderColor: colors.border,
-    borderStyle: 'dashed',
-    borderRadius: radius.md,
-    paddingVertical: spacing.xl,
-    paddingHorizontal: spacing.md,
-    alignItems: 'center',
-    gap: spacing.xs,
-  },
-  fileName: {
-    color: colors.text,
-    fontSize: 15,
-    fontWeight: '600',
-    maxWidth: '100%',
-  },
-  fileMeta: {color: colors.textMuted, fontSize: 13},
-  btn: {
-    minHeight: 50,
-    borderRadius: radius.md,
-    alignItems: 'center',
-    justifyContent: 'center',
-    paddingHorizontal: spacing.lg,
-  },
-  btnGhost: {borderWidth: 1, borderColor: colors.border},
-  btnGhostText: {color: colors.textMuted, fontSize: 15, fontWeight: '600'},
-  btnPrimary: {backgroundColor: colors.primary},
-  btnPrimaryText: {color: '#fff', fontSize: 15, fontWeight: '600'},
-  btnStop: {borderWidth: 1, borderColor: colors.danger},
-  btnStopText: {color: colors.danger, fontSize: 15, fontWeight: '600'},
-  btnDisabled: {opacity: 0.5},
-  pressed: {opacity: 0.7},
-  uploadingRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: spacing.sm,
-    paddingVertical: spacing.xs,
-  },
-  uploadingText: {
-    flex: 1,
-    color: colors.textMuted,
-    fontSize: 13,
-    lineHeight: 18,
-  },
-  error: {color: colors.danger, fontSize: 14},
-  doneCard: {
-    backgroundColor: colors.surface,
-    borderRadius: radius.md,
-    borderWidth: 1,
-    borderColor: colors.border,
-    padding: spacing.lg,
-    alignItems: 'center',
-    gap: spacing.xs,
-  },
-  check: {
-    fontSize: 28,
-    color: colors.primary,
-    fontWeight: '800',
-    marginBottom: spacing.xs,
-  },
-  doneTitle: {fontSize: 18, fontWeight: '700', color: colors.text},
-  doneStore: {fontSize: 15, fontWeight: '600', color: colors.text},
-  doneValidity: {fontSize: 13, color: colors.textMuted},
-  doneBody: {
-    fontSize: 14,
-    color: colors.textMuted,
-    textAlign: 'center',
-    lineHeight: 20,
-  },
-  hint: {
-    fontSize: 13,
-    color: colors.primary,
-    marginTop: spacing.sm,
-  },
-});
+const makeStyles = (c: Palette) =>
+  StyleSheet.create({
+    container: {flex: 1, backgroundColor: c.background},
+    form: {
+      paddingHorizontal: spacing.md,
+      paddingTop: spacing.md,
+      gap: spacing.md,
+    },
+    subtitle: {color: c.textMuted, fontSize: 15, lineHeight: 21},
+    fileBox: {
+      backgroundColor: c.surface,
+      borderWidth: 1,
+      borderColor: c.border,
+      borderStyle: 'dashed',
+      borderRadius: radius.md,
+      paddingVertical: spacing.xl,
+      paddingHorizontal: spacing.md,
+      alignItems: 'center',
+      gap: spacing.xs,
+    },
+    fileName: {
+      color: c.text,
+      fontSize: 15,
+      fontWeight: '600',
+      maxWidth: '100%',
+    },
+    fileMeta: {color: c.textMuted, fontSize: 13},
+    btn: {
+      minHeight: 50,
+      borderRadius: radius.md,
+      alignItems: 'center',
+      justifyContent: 'center',
+      paddingHorizontal: spacing.lg,
+    },
+    btnGhost: {borderWidth: 1, borderColor: c.border},
+    btnGhostText: {color: c.textMuted, fontSize: 15, fontWeight: '600'},
+    btnPrimary: {backgroundColor: c.primary},
+    btnPrimaryText: {
+      color: c.onPrimary,
+      fontFamily: fonts.bold,
+      fontSize: 15,
+      fontWeight: '700',
+    },
+    btnStop: {borderWidth: 1, borderColor: c.danger},
+    btnStopText: {color: c.danger, fontSize: 15, fontWeight: '600'},
+    btnDisabled: {opacity: 0.5},
+    pressed: {opacity: 0.7},
+    uploadingRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: spacing.sm,
+      paddingVertical: spacing.xs,
+    },
+    uploadingText: {
+      flex: 1,
+      color: c.textMuted,
+      fontSize: 13,
+      lineHeight: 18,
+    },
+    error: {color: c.danger, fontSize: 14},
+    doneCard: {
+      backgroundColor: c.surface,
+      borderRadius: radius.md,
+      borderWidth: 1,
+      borderColor: c.border,
+      padding: spacing.lg,
+      alignItems: 'center',
+      gap: spacing.xs,
+    },
+    check: {
+      fontSize: 28,
+      color: c.primary,
+      fontWeight: '800',
+      marginBottom: spacing.xs,
+    },
+    doneTitle: {
+      fontFamily: fonts.display,
+      fontSize: 18,
+      fontWeight: '700',
+      color: c.text,
+    },
+    doneStore: {fontSize: 15, fontWeight: '600', color: c.text},
+    doneValidity: {fontSize: 13, color: c.textMuted},
+    doneBody: {
+      fontSize: 14,
+      color: c.textMuted,
+      textAlign: 'center',
+      lineHeight: 20,
+    },
+    hint: {
+      fontSize: 13,
+      color: c.primary,
+      marginTop: spacing.sm,
+    },
+  });
 
 export default UploadScreen;

@@ -15,7 +15,7 @@ import {
   countActiveFilters,
   fetchFilterFacets,
 } from '../api/extract';
-import {colors, radius, spacing} from '../theme';
+import {Palette, fonts, radius, spacing, useThemedStyles} from '../theme';
 
 type Props = {
   visible: boolean;
@@ -49,6 +49,7 @@ function FilterModal({
   onApply,
   onClose,
 }: Props): React.JSX.Element {
+  const {styles} = useThemedStyles(makeStyles);
   const [draft, setDraft] = useState<ProductFilters>(value);
   const [live, setLive] = useState<FilterFacets>(facets);
 
@@ -236,115 +237,126 @@ function FilterModal({
   );
 }
 
-const styles = StyleSheet.create({
-  backdrop: {
-    flex: 1,
-    backgroundColor: 'rgba(0,0,0,0.5)',
-    justifyContent: 'flex-end',
-  },
-  backdropFill: {flex: 1},
-  sheet: {
-    backgroundColor: colors.background,
-    borderTopLeftRadius: radius.lg,
-    borderTopRightRadius: radius.lg,
-    maxHeight: '85%',
-  },
-  header: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    paddingHorizontal: spacing.md,
-    paddingTop: spacing.md,
-    paddingBottom: spacing.sm,
-  },
-  title: {fontSize: 18, fontWeight: '700', color: colors.text},
-  close: {
-    width: 24,
-    height: 24,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  closeBar: {
-    position: 'absolute',
-    width: 16,
-    height: 2,
-    borderRadius: 1,
-    backgroundColor: colors.textMuted,
-  },
-  closeBarA: {transform: [{rotate: '45deg'}]},
-  closeBarB: {transform: [{rotate: '-45deg'}]},
-  hint: {
-    fontSize: 12,
-    color: colors.textMuted,
-    paddingHorizontal: spacing.md,
-    paddingBottom: spacing.sm,
-    borderBottomWidth: 1,
-    borderBottomColor: colors.border,
-  },
-  body: {alignSelf: 'stretch'},
-  bodyContent: {padding: spacing.md, paddingBottom: spacing.lg},
-  section: {marginBottom: spacing.lg},
-  sectionTitle: {
-    fontSize: 11,
-    fontWeight: '700',
-    letterSpacing: 0.6,
-    textTransform: 'uppercase',
-    color: colors.textMuted,
-    marginBottom: spacing.xs,
-  },
-  row: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: spacing.sm,
-    paddingVertical: 10,
-  },
-  rowPressed: {opacity: 0.6},
-  box: {
-    width: 20,
-    height: 20,
-    borderRadius: 6,
-    borderWidth: 1.5,
-    borderColor: colors.border,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  boxOn: {backgroundColor: colors.primary, borderColor: colors.primary},
-  tick: {width: 8, height: 8, borderRadius: 2, backgroundColor: '#fff'},
-  rowLabel: {flex: 1, fontSize: 15, color: colors.text},
-  rowCount: {
-    fontSize: 13,
-    color: colors.textMuted,
-    fontVariant: ['tabular-nums'],
-  },
-  rowZero: {opacity: 0.4},
-  footer: {
-    flexDirection: 'row',
-    gap: spacing.sm,
-    padding: spacing.md,
-    borderTopWidth: 1,
-    borderTopColor: colors.border,
-  },
-  reset: {
-    minHeight: 48,
-    paddingHorizontal: spacing.lg,
-    borderRadius: radius.md,
-    borderWidth: 1,
-    borderColor: colors.border,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  resetOff: {opacity: 0.4},
-  resetText: {fontSize: 15, fontWeight: '600', color: colors.textMuted},
-  apply: {
-    flex: 1,
-    minHeight: 48,
-    borderRadius: radius.md,
-    backgroundColor: colors.primary,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  applyOn: {opacity: 0.85},
-  applyText: {fontSize: 15, fontWeight: '700', color: '#fff'},
-});
+const makeStyles = (c: Palette) =>
+  StyleSheet.create({
+    backdrop: {
+      flex: 1,
+      backgroundColor: c.scrim,
+      justifyContent: 'flex-end',
+    },
+    backdropFill: {flex: 1},
+    sheet: {
+      backgroundColor: c.surface,
+      borderTopLeftRadius: radius.lg,
+      borderTopRightRadius: radius.lg,
+      maxHeight: '85%',
+    },
+    header: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+      paddingHorizontal: spacing.md,
+      paddingTop: spacing.md,
+      paddingBottom: spacing.sm,
+    },
+    title: {
+      fontFamily: fonts.display,
+      fontSize: 18,
+      fontWeight: '700',
+      color: c.text,
+    },
+    close: {
+      width: 24,
+      height: 24,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    closeBar: {
+      position: 'absolute',
+      width: 16,
+      height: 2,
+      borderRadius: 1,
+      backgroundColor: c.textMuted,
+    },
+    closeBarA: {transform: [{rotate: '45deg'}]},
+    closeBarB: {transform: [{rotate: '-45deg'}]},
+    hint: {
+      fontSize: 12,
+      color: c.textMuted,
+      paddingHorizontal: spacing.md,
+      paddingBottom: spacing.sm,
+      borderBottomWidth: 1,
+      borderBottomColor: c.border,
+    },
+    body: {alignSelf: 'stretch'},
+    bodyContent: {padding: spacing.md, paddingBottom: spacing.lg},
+    section: {marginBottom: spacing.lg},
+    sectionTitle: {
+      fontSize: 11,
+      fontWeight: '700',
+      letterSpacing: 0.6,
+      textTransform: 'uppercase',
+      color: c.textMuted,
+      marginBottom: spacing.xs,
+    },
+    row: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: spacing.sm,
+      paddingVertical: 10,
+    },
+    rowPressed: {opacity: 0.6},
+    box: {
+      width: 20,
+      height: 20,
+      borderRadius: 6,
+      borderWidth: 1.5,
+      borderColor: c.border,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    boxOn: {backgroundColor: c.primary, borderColor: c.primary},
+    tick: {width: 8, height: 8, borderRadius: 2, backgroundColor: '#fff'},
+    rowLabel: {flex: 1, fontSize: 15, color: c.text},
+    rowCount: {
+      fontSize: 13,
+      color: c.textMuted,
+      fontVariant: ['tabular-nums'],
+    },
+    rowZero: {opacity: 0.4},
+    footer: {
+      flexDirection: 'row',
+      gap: spacing.sm,
+      padding: spacing.md,
+      borderTopWidth: 1,
+      borderTopColor: c.border,
+    },
+    reset: {
+      minHeight: 48,
+      paddingHorizontal: spacing.lg,
+      borderRadius: radius.md,
+      borderWidth: 1,
+      borderColor: c.border,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    resetOff: {opacity: 0.4},
+    resetText: {fontSize: 15, fontWeight: '600', color: c.textMuted},
+    apply: {
+      flex: 1,
+      minHeight: 48,
+      borderRadius: radius.md,
+      backgroundColor: c.primary,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    applyOn: {opacity: 0.85},
+    applyText: {
+      fontFamily: fonts.bold,
+      fontSize: 15,
+      fontWeight: '700',
+      color: c.onPrimary,
+    },
+  });
 
 export default FilterModal;

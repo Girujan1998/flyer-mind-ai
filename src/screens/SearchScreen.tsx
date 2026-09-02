@@ -26,12 +26,14 @@ import FilterModal from '../components/FilterModal';
 import ProductCard from '../components/ProductCard';
 import ProductInfoModal from '../components/ProductInfoModal';
 import SourcePageModal from '../components/SourcePageModal';
-import {colors, radius, spacing} from '../theme';
+import ScreenHeader from '../components/ScreenHeader';
+import {Palette, radius, spacing, useThemedStyles} from '../theme';
 
 const PAGE_SIZE = 20;
 const GAP = spacing.sm;
 const COLUMN_WIDTH =
   (Dimensions.get('window').width - spacing.md * 2 - GAP) / 2;
+const FILTER_BTN = 40;
 
 const NO_FACETS: FilterFacets = {
   departments: [],
@@ -42,6 +44,8 @@ const NO_FACETS: FilterFacets = {
 };
 
 function SearchScreen(): React.JSX.Element {
+  const {styles, colors} = useThemedStyles(makeStyles);
+
   const [query, setQuery] = useState('');
   const [debounced, setDebounced] = useState('');
 
@@ -178,6 +182,11 @@ function SearchScreen(): React.JSX.Element {
 
   return (
     <View style={styles.container}>
+      <ScreenHeader
+        title="Search"
+        trailing={facets.total > 0 ? `${facets.total} items` : undefined}
+      />
+
       <View style={styles.searchWrap}>
         <View style={styles.searchRow}>
           <View style={styles.inputWrap}>
@@ -333,115 +342,114 @@ function SearchScreen(): React.JSX.Element {
   );
 }
 
-const FILTER_BTN = 40;
-
-const styles = StyleSheet.create({
-  container: {flex: 1},
-  searchWrap: {
-    paddingHorizontal: spacing.md,
-    paddingTop: spacing.md,
-    paddingBottom: spacing.sm,
-  },
-  searchRow: {flexDirection: 'row', alignItems: 'center', gap: spacing.sm},
-  inputWrap: {flex: 1, justifyContent: 'center'},
-  input: {
-    height: FILTER_BTN,
-    borderRadius: radius.md,
-    borderWidth: 1,
-    borderColor: colors.border,
-    backgroundColor: colors.surface,
-    paddingLeft: spacing.md,
-    paddingRight: 36,
-    fontSize: 15,
-    color: colors.text,
-  },
-  clearBtn: {
-    position: 'absolute',
-    right: 8,
-    width: 20,
-    height: 20,
-    borderRadius: 10,
-    backgroundColor: colors.textMuted,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  clearBar: {
-    position: 'absolute',
-    width: 10,
-    height: 1.5,
-    borderRadius: 1,
-    backgroundColor: '#fff',
-  },
-  clearBarA: {transform: [{rotate: '45deg'}]},
-  clearBarB: {transform: [{rotate: '-45deg'}]},
-  filterBtn: {
-    width: FILTER_BTN,
-    height: FILTER_BTN,
-    borderRadius: radius.md,
-    borderWidth: 1,
-    borderColor: colors.border,
-    backgroundColor: colors.surface,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  filterBtnActive: {
-    borderColor: colors.primary,
-    backgroundColor: colors.primaryTint,
-  },
-  funnel: {alignItems: 'center'},
-  funnelCone: {
-    width: 0,
-    height: 0,
-    borderLeftWidth: 7,
-    borderRightWidth: 7,
-    borderTopWidth: 8,
-    borderLeftColor: 'transparent',
-    borderRightColor: 'transparent',
-  },
-  funnelStem: {width: 2, height: 5},
-  filterBadge: {
-    position: 'absolute',
-    top: -5,
-    right: -5,
-    minWidth: 16,
-    height: 16,
-    borderRadius: 8,
-    paddingHorizontal: 3,
-    backgroundColor: colors.primary,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  filterBadgeText: {color: '#fff', fontSize: 10, fontWeight: '800'},
-  center: {
-    flex: 1,
-    alignItems: 'center',
-    justifyContent: 'center',
-    padding: spacing.lg,
-  },
-  empty: {color: colors.textMuted, fontSize: 14, textAlign: 'center'},
-  error: {color: colors.danger, fontSize: 14, textAlign: 'center'},
-  retry: {marginTop: spacing.md, padding: spacing.sm},
-  retryText: {color: colors.primary, fontSize: 14, fontWeight: '600'},
-  grid: {padding: spacing.md, paddingBottom: 96, gap: GAP},
-  column: {gap: GAP},
-  footer: {paddingVertical: spacing.lg, alignItems: 'center'},
-  footerEnd: {
-    textAlign: 'center',
-    color: colors.textMuted,
-    fontSize: 12,
-    paddingVertical: spacing.lg,
-  },
-  moreBtn: {
-    marginTop: spacing.md,
-    alignSelf: 'center',
-    paddingVertical: spacing.sm + 2,
-    paddingHorizontal: spacing.lg,
-    borderRadius: radius.md,
-    borderWidth: 1,
-    borderColor: colors.border,
-  },
-  moreText: {color: colors.primary, fontSize: 14, fontWeight: '600'},
-  pressed: {opacity: 0.6},
-});
+const makeStyles = (c: Palette) =>
+  StyleSheet.create({
+    container: {flex: 1, backgroundColor: c.background},
+    searchWrap: {
+      paddingHorizontal: spacing.md,
+      paddingTop: spacing.sm,
+      paddingBottom: spacing.sm,
+    },
+    searchRow: {flexDirection: 'row', alignItems: 'center', gap: spacing.sm},
+    inputWrap: {flex: 1, justifyContent: 'center'},
+    input: {
+      height: FILTER_BTN,
+      borderRadius: radius.md,
+      borderWidth: 1,
+      borderColor: c.border,
+      backgroundColor: c.surface,
+      paddingLeft: spacing.md,
+      paddingRight: 36,
+      fontSize: 15,
+      color: c.text,
+    },
+    clearBtn: {
+      position: 'absolute',
+      right: 8,
+      width: 20,
+      height: 20,
+      borderRadius: 10,
+      backgroundColor: c.textMuted,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    clearBar: {
+      position: 'absolute',
+      width: 10,
+      height: 1.5,
+      borderRadius: 1,
+      backgroundColor: c.surface,
+    },
+    clearBarA: {transform: [{rotate: '45deg'}]},
+    clearBarB: {transform: [{rotate: '-45deg'}]},
+    filterBtn: {
+      width: FILTER_BTN,
+      height: FILTER_BTN,
+      borderRadius: radius.md,
+      borderWidth: 1,
+      borderColor: c.border,
+      backgroundColor: c.surface,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    filterBtnActive: {
+      borderColor: c.primary,
+      backgroundColor: c.primaryTint,
+    },
+    funnel: {alignItems: 'center'},
+    funnelCone: {
+      width: 0,
+      height: 0,
+      borderLeftWidth: 7,
+      borderRightWidth: 7,
+      borderTopWidth: 8,
+      borderLeftColor: 'transparent',
+      borderRightColor: 'transparent',
+    },
+    funnelStem: {width: 2, height: 5},
+    filterBadge: {
+      position: 'absolute',
+      top: -5,
+      right: -5,
+      minWidth: 16,
+      height: 16,
+      borderRadius: 8,
+      paddingHorizontal: 3,
+      backgroundColor: c.deal,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    filterBadgeText: {color: '#fff', fontSize: 10, fontWeight: '800'},
+    center: {
+      flex: 1,
+      alignItems: 'center',
+      justifyContent: 'center',
+      padding: spacing.lg,
+    },
+    empty: {color: c.textMuted, fontSize: 14, textAlign: 'center'},
+    error: {color: c.danger, fontSize: 14, textAlign: 'center'},
+    retry: {marginTop: spacing.md, padding: spacing.sm},
+    retryText: {color: c.primary, fontSize: 14, fontWeight: '600'},
+    grid: {padding: spacing.md, paddingBottom: 96, gap: GAP},
+    column: {gap: GAP},
+    footer: {paddingVertical: spacing.lg, alignItems: 'center'},
+    footerEnd: {
+      textAlign: 'center',
+      color: c.textMuted,
+      fontSize: 12,
+      paddingVertical: spacing.lg,
+    },
+    moreBtn: {
+      marginTop: spacing.md,
+      alignSelf: 'center',
+      paddingVertical: spacing.sm + 2,
+      paddingHorizontal: spacing.lg,
+      borderRadius: radius.md,
+      borderWidth: 1,
+      borderColor: c.border,
+    },
+    moreText: {color: c.primary, fontSize: 14, fontWeight: '600'},
+    pressed: {opacity: 0.6},
+  });
 
 export default SearchScreen;
