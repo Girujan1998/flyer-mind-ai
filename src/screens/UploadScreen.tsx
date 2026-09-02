@@ -210,8 +210,9 @@ function UploadScreen(): React.JSX.Element {
       <ScreenHeader title="Add a flyer" />
       <View style={styles.form}>
         <Text style={styles.subtitle}>
-          Drop a flyer PDF from your phone. Its products, prices and deal tags
-          are pulled out and filed under Search.
+          Drop a flyer PDF from your phone. It will extract products, prices,
+          deals, and information to search through and compare with other
+          uploaded flyers.
         </Text>
 
         <View style={styles.fileBox}>
@@ -313,8 +314,17 @@ const makeStyles = (c: Palette) =>
       justifyContent: 'center',
       paddingHorizontal: spacing.lg,
     },
-    btnGhost: {borderWidth: 1, borderColor: c.border},
-    btnGhostText: {color: c.textMuted, fontSize: 15, fontWeight: '600'},
+    btnGhost: {
+      backgroundColor: c.surface,
+      borderWidth: 1,
+      borderColor: c.border,
+    },
+    btnGhostText: {
+      color: c.text,
+      fontFamily: fonts.semibold,
+      fontSize: 15,
+      fontWeight: '600',
+    },
     btnPrimary: {backgroundColor: c.primary},
     btnPrimaryText: {
       color: c.onPrimary,
