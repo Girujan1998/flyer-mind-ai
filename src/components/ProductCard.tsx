@@ -5,7 +5,7 @@ import {Product, flyerStatus, formatShortDate} from '../api/extract';
 import {Palette, fonts, radius, spacing, useThemedStyles} from '../theme';
 import FlyerStatusPill from './FlyerStatusPill';
 
-const THUMB_HEIGHT = 116;
+const THUMB_HEIGHT = 140;
 
 /** Below this the model isn't sure it read the tile right — flag for review. */
 const LOW_CONFIDENCE = 55;
@@ -59,7 +59,7 @@ function ProductCard({product, width, onPress}: Props): React.JSX.Element {
           <Image
             source={{uri: product.thumb}}
             style={styles.thumbImage}
-            resizeMode="cover"
+            resizeMode="contain"
           />
         ) : (
           <Text style={styles.noImage}>no image</Text>
@@ -138,6 +138,7 @@ const makeStyles = (c: Palette) =>
     pressed: {opacity: 0.75},
     thumb: {
       height: THUMB_HEIGHT,
+      padding: 4,
       alignItems: 'center',
       justifyContent: 'center',
       backgroundColor: c.imageBackdrop,
