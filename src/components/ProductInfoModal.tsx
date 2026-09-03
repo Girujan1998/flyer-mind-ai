@@ -1,5 +1,6 @@
 import React from 'react';
 import {
+  Dimensions,
   Image,
   Modal,
   Pressable,
@@ -9,20 +10,81 @@ import {
   View,
 } from 'react-native';
 
-import {Product, flyerStatus, formatValidity} from '../api/extract';
+import {
+  FlyerPage,
+  Product,
+  boxToRect,
+  flyerStatus,
+  formatValidity,
+} from '../api/extract';
 import {Palette, fonts, radius, spacing, useThemedStyles} from '../theme';
 import FlyerStatusPill from './FlyerStatusPill';
 
+const HERO_HEIGHT = 200;
+
 type Props = {
   product: Product | null;
+  /** The product's flyer page — lets the hero crop from the full-res render. */
+  page?: FlyerPage;
   onClose: () => void;
   /** Open the full flyer page with this product outlined. */
   onViewInFlyer: (product: Product) => void;
 };
 
+/**
+ * A sharp hero: pan + scale the full-res page image so the product's box fills
+ * the frame. Falls back to the small thumbnail when there's no page/box.
+ */
+function Hero({
+  product,
+  page,
+  styles,
+}: {
+  product: Product;
+  page?: FlyerPage;
+  styles: ReturnType<typeof makeStyles>;
+}): React.JSX.Element {
+  const heroW = Dimensions.get('window').width;
+  const rect =
+    page && page.width > 0
+      ? boxToRect(product.box, page.width, page.height, 6)
+      : null;
+
+  if (page && rect) {
+    // scale so the box takes ~88% of the frame, then centre it
+    const k = Math.min(
+      (heroW * 0.88) / rect.width,
+      (HERO_HEIGHT * 0.88) / rect.height,
+    );
+    const imgW = page.width * k;
+    const imgH = page.height * k;
+    const left = heroW / 2 - (rect.x + rect.width / 2) * k;
+    const top = HERO_HEIGHT / 2 - (rect.y + rect.height / 2) * k;
+    return (
+      <Image
+        source={{uri: page.image}}
+        style={[styles.heroCrop, {width: imgW, height: imgH, left, top}]}
+        resizeMode="stretch"
+      />
+    );
+  }
+
+  if (product.thumb) {
+    return (
+      <Image
+        source={{uri: product.thumb}}
+        style={styles.heroImage}
+        resizeMode="contain"
+      />
+    );
+  }
+  return <Text style={styles.noImage}>no image</Text>;
+}
+
 /** Everything known about one product, opened by tapping its search card. */
 function ProductInfoModal({
   product,
+  page,
   onClose,
   onViewInFlyer,
 }: Props): React.JSX.Element {
@@ -47,15 +109,7 @@ function ProductInfoModal({
           {product ? (
             <>
               <View style={styles.hero}>
-                {product.thumb ? (
-                  <Image
-                    source={{uri: product.thumb}}
-                    style={styles.heroImage}
-                    resizeMode="cover"
-                  />
-                ) : (
-                  <Text style={styles.noImage}>no image</Text>
-                )}
+                <Hero product={product} page={page} styles={styles} />
                 <View style={styles.statusPill}>
                   <FlyerStatusPill status={status} />
                 </View>
@@ -166,12 +220,14 @@ const makeStyles = (c: Palette) =>
       maxHeight: '92%',
     },
     hero: {
-      height: 200,
+      height: HERO_HEIGHT,
+      overflow: 'hidden',
       backgroundColor: c.imageBackdrop,
       alignItems: 'center',
       justifyContent: 'center',
     },
     heroImage: {width: '100%', height: '100%'},
+    heroCrop: {position: 'absolute'},
     noImage: {color: c.textMuted, fontSize: 13},
     statusPill: {position: 'absolute', top: spacing.sm, left: spacing.sm},
     close: {

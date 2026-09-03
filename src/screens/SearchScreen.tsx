@@ -320,6 +320,11 @@ function SearchScreen(): React.JSX.Element {
 
       <ProductInfoModal
         product={infoProduct}
+        page={
+          infoProduct
+            ? pages.get(pageKey(infoProduct.flyerId, infoProduct.page))
+            : undefined
+        }
         onClose={() => setInfoProduct(null)}
         onViewInFlyer={product => {
           // Let the info sheet finish dismissing before the next modal presents
