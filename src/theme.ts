@@ -20,6 +20,8 @@ export type Palette = {
   primary: string;
   primaryTint: string;
   onPrimary: string;
+  /** Amber — the "upcoming" flyer state (prices not live yet). */
+  upcoming: string;
   /** Ripe tomato — on sale / SALE / promo. */
   deal: string;
   dealTint: string;
@@ -44,6 +46,7 @@ export const lightPalette: Palette = {
   primary: '#1f6b4a',
   primaryTint: 'rgba(31, 107, 74, 0.12)',
   onPrimary: '#ffffff',
+  upcoming: '#8a5a12',
   deal: '#df5230',
   dealTint: 'rgba(223, 82, 48, 0.12)',
   danger: '#c2401f',
@@ -66,6 +69,7 @@ export const darkPalette: Palette = {
   primary: '#4fc78a',
   primaryTint: 'rgba(79, 199, 138, 0.16)',
   onPrimary: '#122019',
+  upcoming: '#e2ab55',
   deal: '#ff7a52',
   dealTint: 'rgba(255, 122, 82, 0.16)',
   danger: '#f2867e',

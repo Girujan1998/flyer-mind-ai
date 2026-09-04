@@ -3,7 +3,6 @@ import {Image, Pressable, StyleSheet, Text, View} from 'react-native';
 
 import {Product, flyerStatus, formatShortDate} from '../api/extract';
 import {Palette, fonts, radius, spacing, useThemedStyles} from '../theme';
-import FlyerStatusPill from './FlyerStatusPill';
 
 const THUMB_HEIGHT = 140;
 
@@ -16,16 +15,6 @@ type Props = {
   onPress: (product: Product) => void;
 };
 
-/** A tiny calendar mark drawn with Views (no icon lib). */
-function CalendarMark({color}: {color: string}): React.JSX.Element {
-  const {styles} = useThemedStyles(makeStyles);
-  return (
-    <View style={[styles.cal, {borderColor: color}]}>
-      <View style={[styles.calHead, {backgroundColor: color}]} />
-    </View>
-  );
-}
-
 function ProductCard({product, width, onPress}: Props): React.JSX.Element {
   const {styles, colors} = useThemedStyles(makeStyles);
 
@@ -36,15 +25,24 @@ function ProductCard({product, width, onPress}: Props): React.JSX.Element {
   const startShort = formatShortDate(product.validFrom);
   const endShort = formatShortDate(product.validTo);
 
+  // Upcoming / expired always get a chip (you shouldn't miss them); a valid
+  // flyer only shows one when there's an end date to count down to.
   let dateLabel = '';
-  if (status === 'upcoming' && startShort) {
-    dateLabel = `Starts ${startShort}`;
-  } else if (status === 'expired' && endShort) {
-    dateLabel = `Ended ${endShort}`;
+  if (status === 'upcoming') {
+    dateLabel = startShort ? `Starts ${startShort}` : 'Upcoming';
+  } else if (status === 'expired') {
+    dateLabel = endShort ? `Ended ${endShort}` : 'Expired';
   } else if (status === 'valid' && endShort) {
     dateLabel = `Ends ${endShort}`;
   }
-  const dateColor = status === 'expired' ? colors.danger : colors.textMuted;
+  // The flyer-validity signal now lives in this one chip on the date line —
+  // green = prices live, amber = not yet, grey = lapsed.
+  const dotColor =
+    status === 'upcoming'
+      ? colors.upcoming
+      : status === 'expired'
+      ? colors.textMuted
+      : colors.primary;
 
   return (
     <Pressable
@@ -64,9 +62,6 @@ function ProductCard({product, width, onPress}: Props): React.JSX.Element {
         ) : (
           <Text style={styles.noImage}>no image</Text>
         )}
-        <View style={styles.statusPill}>
-          <FlyerStatusPill status={status} compact />
-        </View>
         {product.onSale ? (
           <View style={styles.salePill} accessibilityLabel="On sale">
             <Text style={styles.saleText}>SALE</Text>
@@ -105,9 +100,9 @@ function ProductCard({product, width, onPress}: Props): React.JSX.Element {
         ) : null}
 
         {dateLabel ? (
-          <View style={styles.dateRow}>
-            <CalendarMark color={dateColor} />
-            <Text style={[styles.dateText, {color: dateColor}]}>
+          <View style={styles.dateChip}>
+            <View style={[styles.dateDot, {backgroundColor: dotColor}]} />
+            <Text style={styles.dateText} numberOfLines={1}>
               {dateLabel}
             </Text>
           </View>
@@ -145,10 +140,9 @@ const makeStyles = (c: Palette) =>
     },
     thumbImage: {width: '100%', height: '100%'},
     noImage: {color: c.textMuted, fontSize: 12},
-    statusPill: {position: 'absolute', top: 6, left: 6},
     salePill: {
       position: 'absolute',
-      bottom: 6,
+      top: 6,
       left: 6,
       paddingVertical: 3,
       paddingHorizontal: 8,
@@ -212,21 +206,23 @@ const makeStyles = (c: Palette) =>
       fontWeight: '700',
     },
     page: {color: c.textMuted, fontSize: 11},
-    dateRow: {flexDirection: 'row', alignItems: 'center', gap: 5},
-    dateText: {fontSize: 11, lineHeight: 15},
-    cal: {
-      width: 11,
-      height: 11,
-      borderWidth: 1.2,
-      borderRadius: 2,
-      marginTop: 1,
+    dateChip: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      alignSelf: 'flex-start',
+      gap: 6,
+      paddingVertical: 3,
+      paddingLeft: 7,
+      paddingRight: 9,
+      borderRadius: radius.pill,
+      backgroundColor: c.surfaceAlt,
     },
-    calHead: {
-      position: 'absolute',
-      top: -0.5,
-      left: -0.5,
-      right: -0.5,
-      height: 3,
+    dateDot: {width: 6, height: 6, borderRadius: 3},
+    dateText: {
+      color: c.textMuted,
+      fontSize: 11,
+      fontWeight: '600',
+      lineHeight: 15,
     },
     store: {
       alignSelf: 'flex-end',
