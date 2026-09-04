@@ -184,7 +184,10 @@ function SearchScreen(): React.JSX.Element {
     <View style={styles.container}>
       <ScreenHeader
         title="Search"
-        trailing={facets.total > 0 ? `${facets.total} items` : undefined}
+        trailing={
+          // count for the current query + filters, not the grand total
+          !error && total > 0 ? `${total} items` : undefined
+        }
       />
 
       <View style={styles.searchWrap}>
