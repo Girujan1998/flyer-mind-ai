@@ -39,10 +39,10 @@ function ProductCard({product, width, onPress}: Props): React.JSX.Element {
   // green = prices live, amber = not yet, grey = lapsed.
   const dotColor =
     status === 'upcoming'
-      ? colors.upcoming
+      ? colors.statusUpcoming
       : status === 'expired'
-      ? colors.textMuted
-      : colors.primary;
+      ? colors.statusExpired
+      : colors.statusLive;
 
   return (
     <Pressable
@@ -217,7 +217,7 @@ const makeStyles = (c: Palette) =>
       borderRadius: radius.pill,
       backgroundColor: c.surfaceAlt,
     },
-    dateDot: {width: 6, height: 6, borderRadius: 3},
+    dateDot: {width: 7, height: 7, borderRadius: 3.5},
     dateText: {
       color: c.textMuted,
       fontSize: 11,

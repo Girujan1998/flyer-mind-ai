@@ -20,8 +20,13 @@ export type Palette = {
   primary: string;
   primaryTint: string;
   onPrimary: string;
-  /** Amber — the "upcoming" flyer state (prices not live yet). */
-  upcoming: string;
+  /**
+   * Flyer-status dots on the search cards. Kept vivid and well apart in hue —
+   * live (green), upcoming (amber), expired (grey) — so they read at a glance.
+   */
+  statusLive: string;
+  statusUpcoming: string;
+  statusExpired: string;
   /** Ripe tomato — on sale / SALE / promo. */
   deal: string;
   dealTint: string;
@@ -46,7 +51,9 @@ export const lightPalette: Palette = {
   primary: '#1f6b4a',
   primaryTint: 'rgba(31, 107, 74, 0.12)',
   onPrimary: '#ffffff',
-  upcoming: '#8a5a12',
+  statusLive: '#12a150',
+  statusUpcoming: '#e08b1e',
+  statusExpired: '#8a837a',
   deal: '#df5230',
   dealTint: 'rgba(223, 82, 48, 0.12)',
   danger: '#c2401f',
@@ -69,7 +76,9 @@ export const darkPalette: Palette = {
   primary: '#4fc78a',
   primaryTint: 'rgba(79, 199, 138, 0.16)',
   onPrimary: '#122019',
-  upcoming: '#e2ab55',
+  statusLive: '#3ddc84',
+  statusUpcoming: '#f5b342',
+  statusExpired: '#9a9186',
   deal: '#ff7a52',
   dealTint: 'rgba(255, 122, 82, 0.16)',
   danger: '#f2867e',
