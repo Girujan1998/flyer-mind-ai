@@ -44,14 +44,23 @@ function ProductCard({product, width, onPress}: Props): React.JSX.Element {
       ? colors.statusExpired
       : colors.statusLive;
 
+  // An expired flyer's card is turned down, not off: dimmed, deal colours
+  // drained, image washed toward neutral — but it stays a full tap target.
+  const expired = status === 'expired';
+
   return (
     <Pressable
       accessibilityRole="button"
       accessibilityLabel={`${product.name || 'Unnamed item'}, ${
         product.price || 'no price'
-      }`}
+      }${expired ? ', flyer expired' : ''}`}
       onPress={() => onPress(product)}
-      style={({pressed}) => [styles.card, {width}, pressed && styles.pressed]}>
+      style={({pressed}) => [
+        styles.card,
+        {width},
+        expired && styles.cardExpired,
+        pressed && styles.pressed,
+      ]}>
       <View style={styles.thumb}>
         {product.thumb ? (
           <Image
@@ -62,9 +71,16 @@ function ProductCard({product, width, onPress}: Props): React.JSX.Element {
         ) : (
           <Text style={styles.noImage}>no image</Text>
         )}
+        {expired ? (
+          <View style={styles.thumbWash} pointerEvents="none" />
+        ) : null}
         {product.onSale ? (
-          <View style={styles.salePill} accessibilityLabel="On sale">
-            <Text style={styles.saleText}>SALE</Text>
+          <View
+            style={[styles.salePill, expired && styles.salePillMuted]}
+            accessibilityLabel="On sale">
+            <Text style={[styles.saleText, expired && styles.saleTextMuted]}>
+              SALE
+            </Text>
           </View>
         ) : null}
         {lowConfidence ? (
@@ -83,7 +99,12 @@ function ProductCard({product, width, onPress}: Props): React.JSX.Element {
 
         <View style={styles.metaRow}>
           <View style={styles.priceWrap}>
-            <Text style={[styles.price, product.onSale && styles.priceDeal]}>
+            <Text
+              style={[
+                styles.price,
+                product.onSale && styles.priceDeal,
+                expired && styles.textDrained,
+              ]}>
               {product.price || '—'}
             </Text>
             {product.wasPrice ? (
@@ -94,7 +115,9 @@ function ProductCard({product, width, onPress}: Props): React.JSX.Element {
         </View>
 
         {product.promoText ? (
-          <Text style={styles.promo} numberOfLines={1}>
+          <Text
+            style={[styles.promo, expired && styles.textDrained]}
+            numberOfLines={1}>
             {product.promoText}
           </Text>
         ) : null}
@@ -131,6 +154,9 @@ const makeStyles = (c: Palette) =>
       elevation: 2,
     },
     pressed: {opacity: 0.75},
+    // Expired: turn the whole card down. `pressed` (0.75) lands after this in
+    // the style array, so a press still lifts it back toward full.
+    cardExpired: {opacity: 0.66},
     thumb: {
       height: THUMB_HEIGHT,
       padding: 4,
@@ -140,6 +166,17 @@ const makeStyles = (c: Palette) =>
     },
     thumbImage: {width: '100%', height: '100%'},
     noImage: {color: c.textMuted, fontSize: 12},
+    // No native greyscale without a lib — wash the image toward the neutral
+    // backdrop so packaging colour stops reading as a live promo.
+    thumbWash: {
+      position: 'absolute',
+      top: 0,
+      left: 0,
+      right: 0,
+      bottom: 0,
+      backgroundColor: c.imageBackdrop,
+      opacity: 0.45,
+    },
     salePill: {
       position: 'absolute',
       top: 6,
@@ -155,6 +192,13 @@ const makeStyles = (c: Palette) =>
       fontWeight: '800',
       letterSpacing: 0.5,
     },
+    // Expired: SALE loses its fill, becomes a quiet outline.
+    salePillMuted: {
+      backgroundColor: 'transparent',
+      borderWidth: 1,
+      borderColor: c.textMuted,
+    },
+    saleTextMuted: {color: c.textMuted},
     badge: {
       position: 'absolute',
       top: 6,
@@ -194,6 +238,8 @@ const makeStyles = (c: Palette) =>
       fontWeight: '800',
     },
     priceDeal: {color: c.deal},
+    // Expired: drain deal-coloured text (price, promo) back to neutral.
+    textDrained: {color: c.textMuted},
     wasPrice: {
       color: c.textMuted,
       fontSize: 11,
