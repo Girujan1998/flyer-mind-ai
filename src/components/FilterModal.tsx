@@ -29,7 +29,7 @@ type Props = {
 };
 
 const STATUS_LABEL: Record<string, string> = {
-  valid: 'Valid',
+  valid: 'Active',
   upcoming: 'Upcoming',
   expired: 'Expired',
   unknown: 'Unknown / no dates',

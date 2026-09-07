@@ -16,7 +16,7 @@ export type Palette = {
   border: string;
   text: string;
   textMuted: string;
-  /** Grocery green — primary actions, "Valid". */
+  /** Grocery green — primary actions, "Active". */
   primary: string;
   primaryTint: string;
   onPrimary: string;

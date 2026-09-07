@@ -327,6 +327,14 @@ const STATUS_CASE = `CASE
   ELSE 'valid'
 END`;
 
+// Sort key for the default (unfiltered) list: active/undated first, then
+// upcoming, then expired at the bottom. Same two `?` binds as STATUS_CASE.
+const STATUS_RANK = `CASE ${STATUS_CASE}
+  WHEN 'upcoming' THEN 1
+  WHEN 'expired'  THEN 2
+  ELSE 0
+END`;
+
 const toList = v =>
   (Array.isArray(v) ? v : String(v || '').split(','))
     .map(s => String(s).trim())
@@ -406,6 +414,14 @@ export function searchProducts(
     )
     .get(...params).n;
 
+  // Plain browse (no query, no filters): rank by flyer status so expired
+  // flyers sink to the bottom. Any narrowing keeps the plain newest-first order.
+  const plain = clause === '';
+  const orderBy = plain
+    ? `ORDER BY ${STATUS_RANK}, p.created_at DESC, p.rowid DESC`
+    : 'ORDER BY p.created_at DESC, p.rowid DESC';
+  const orderParams = plain ? [today, today] : [];
+
   const rows = db
     .prepare(
       `SELECT p.id, p.flyer_id, p.page, p.name, p.price, p.price_value, p.info,
@@ -415,10 +431,10 @@ export function searchProducts(
          FROM products p
          JOIN flyers f ON f.id = p.flyer_id
          ${clause}
-        ORDER BY p.created_at DESC, p.rowid DESC
+        ${orderBy}
         LIMIT ? OFFSET ?`,
     )
-    .all(...params, lim, off);
+    .all(...params, ...orderParams, lim, off);
 
   const products = rows.map(r => ({
     id: r.id,

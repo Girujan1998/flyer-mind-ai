@@ -7,7 +7,7 @@ import {Palette, useThemedStyles} from '../theme';
 type Known = Exclude<FlyerStatus, 'unknown'>;
 
 const LABEL: Record<Known, string> = {
-  valid: 'Valid',
+  valid: 'Active',
   upcoming: 'Upcoming',
   expired: 'Expired',
 };
