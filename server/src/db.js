@@ -201,7 +201,7 @@ export const saveExtraction = db.transaction(
         id,
         flyer_id: flyerId,
         page: pr.page,
-        name: pr.name || 'Unnamed item',
+        name: titleCaseName(pr.name) || 'Unnamed item',
         price: pr.price || null,
         price_value: pr.priceValue ?? null,
         info: pr.info || null,
@@ -292,10 +292,13 @@ function safeJsonArray(s) {
 }
 
 /**
- * Capitalise the first letter of every word for display, e.g.
- * "Selection eco compostable coffee cups" -> "Selection Eco Compostable Coffee
- * Cups". Only the leading letter of each whitespace-separated token is touched,
- * so existing caps are kept ("RITZ", "GPS", "BioSteel", "iögo" -> "Iögo").
+ * Capitalise the first letter of every word, e.g. "Selection eco compostable
+ * coffee cups" -> "Selection Eco Compostable Coffee Cups". Only the leading
+ * letter of each whitespace-separated token is touched, so existing caps are
+ * kept ("RITZ", "GPS", "BioSteel", "iögo" -> "Iögo"). Applied both when
+ * products are stored (so the DB is canonical) and on the way out of
+ * searchProducts (so names extracted before this still read right); it's
+ * idempotent, so running it twice is a no-op.
  */
 function titleCaseName(name) {
   return (name || '').replace(
