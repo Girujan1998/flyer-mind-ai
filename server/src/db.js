@@ -291,6 +291,19 @@ function safeJsonArray(s) {
   }
 }
 
+/**
+ * Capitalise the first letter of every word for display, e.g.
+ * "Selection eco compostable coffee cups" -> "Selection Eco Compostable Coffee
+ * Cups". Only the leading letter of each whitespace-separated token is touched,
+ * so existing caps are kept ("RITZ", "GPS", "BioSteel", "iögo" -> "Iögo").
+ */
+function titleCaseName(name) {
+  return (name || '').replace(
+    /(^|\s)(\P{L}*)(\p{L})/gu,
+    (_, sep, lead, first) => sep + lead + first.toUpperCase(),
+  );
+}
+
 export const STATUSES = ['valid', 'upcoming', 'expired', 'unknown'];
 
 /** Local "YYYY-MM-DD" — compared string-wise against the flyer date columns. */
@@ -408,7 +421,7 @@ export function searchProducts(
     id: r.id,
     flyerId: r.flyer_id,
     page: r.page,
-    name: r.name,
+    name: titleCaseName(r.name),
     price: r.price || '',
     priceValue: r.price_value,
     info: r.info || '',
