@@ -18,38 +18,181 @@ npm run dev                    # http://localhost:3001, restarts on change
 Set `GEMINI_API_KEY=MOCK` in `.env` to return canned products without a key —
 useful for checking the render → upload → grid flow.
 
-Point the app at it: in the repo root, `EXPO_PUBLIC_API_BASE_URL=http://localhost:3001`
-(this is the default in `app.json`; the iOS simulator can reach `localhost`, a
-physical device needs your machine's LAN IP).
+On startup it prints the LAN URL and the exact `src/config.ts` line to set so a
+phone on the same Wi-Fi can reach it.
+
+## Watching logs while testing on a phone
+
+Every run appends to `logs/server.log` (as well as stdout). While the app runs
+on your device:
+
+```bash
+# terminal 1 — the server
+cd server && npm start          # or `npm run dev`
+
+# terminal 2 — follow the log
+cd server && npm run logs
+```
+
+You'll see one `[req] <phone-ip> POST /flyers/extract 200 41000ms` line per
+upload, then the per-page `[gemini] pages N …` breakdown, a `[gemini] TOTAL`,
+and any `truncated` / `FAILED` warnings. `logs/` is gitignored.
+
+## Store name + validity window
+
+On upload, one extra Gemini call runs against **page 1 only** to read the
+retailer name and the price-validity date range ("Prices in effect Aug 27 –
+Sep 2"). It is stored on the `flyers` row (`store`, `valid_from`, `valid_to`,
+`meta_confidence`) and returned on every product in `GET /products`.
+
+- Costs ~1,700–1,900 tokens per flyer (mostly the page-1 image) and **one extra
+  request** — it runs in parallel with the product extraction, so no extra
+  wall-clock time.
+- When a flyer prints the year, both dates land exactly. When the year is
+  **not** printed (common on Walmart circulars) the model assumes the current
+  year — the month/day are right, the year may be off. `""` for both dates if
+  no range is printed on page 1.
+- `node scripts/test-flyer-meta.mjs <file.pdf> ...` runs just this call (no DB,
+  no product extraction) and prints the result + token usage.
+
+## Category, tags, department
+
+Three levels of grouping on every product, all from the same vision call (no
+extra request, ~25 extra output tokens each):
+
+- **`category`** — brand/size-stripped type, 1-4 words: `body spray deodorant`,
+  `ice cream`, `cream`.
+- **`tags`** — 2-6 lowercase synonyms / aisle words:
+  `["deodorant","body spray","antiperspirant"]`.
+- **`department`** — one fixed store aisle (`fruit`, `vegetables`, `laundry`,
+  `dairy & eggs`, `electronics`, …; full list in `src/departments.js`).
+
+`category` and `tags` are matched by `GET /products?q=` (so "ice cream" finds
+"Selection ice milk"); `department` is a filter — `GET /products?department=laundry`
+— and `GET /departments` returns `{ departments: [{ department, count }] }` for
+the app's filter chips.
+
+## On sale vs. just listed
+
+Each product also carries, from the same vision call:
+
+- **`wasPrice`** — the struck-through / "reg." price when the tile shows one
+  (`"$5.99"`), else `""`. A "was" price that isn't actually higher than the
+  current price is dropped (common misread).
+- **`promoText`** — a verbatim deal callout (`"Save $2"`, `"2 for $5"`,
+  `"Rollback"`), else `""`.
+- **`onSale`** — `true` when `wasPrice` **or** `promoText` is set. Strict: a
+  plain flyer price with no discount wording is **not** "on sale".
+
+Filter with `GET /products?sale=1`; `GET /filters` returns `saleCount`.
+Existing products predate this and are all `onSale:false` until re-extracted —
+there is no reliable text-only backfill (the was-price was never stored).
+
+Products stored before a field existed have it blank. Backfill with text-only
+passes (names only, no images, batched — run categories first):
+
+```bash
+npm run backfill:categories                    # name -> category + tags
+npm run backfill:departments                    # category -> department (cheap: per distinct category)
+node scripts/backfill-categories.mjs --dry      # one batch, print, don't write
+```
+
+## Storage
+
+Extracted products are **saved to SQLite** (`data/flyer.db`, better-sqlite3).
+Images on disk under `data/`:
+
+- `pages/<flyerId>/<page>.jpg` — the full rendered page (for the source-page view)
+- `thumbs/<flyerId>/<productId>.jpg` — a small crop of each product's bounding
+  box (mupdf pixmap warp), so the product list shows tiny images instead of
+  loading + upscaling the whole page per card
+
+`data/` is gitignored; delete it to start fresh. Re-uploading the exact same PDF
+(matched by sha256) is not re-extracted — it returns the stored summary.
 
 ## API
 
 ### `POST /flyers/extract`
 
 `multipart/form-data`, field **`file`** = the flyer PDF. Optional `?maxpages=N`.
+Extracts, **saves to the DB**, and returns a summary only:
 
 ```jsonc
 {
-  "pages": [
-    { "page": 1, "width": 1224, "height": 1584, "image": "data:image/jpeg;base64,..." }
-  ],
+  "flyerId": "…", "name": "flyer.pdf",
+  "savedProducts": 16, "renderedPages": 1, "totalPages": 1,
+  "store": "Food Basics", "validFrom": "2026-08-27", "validTo": "2026-09-02",
+  "failedPages": [], "reused": false
+}
+```
+
+### `GET /products?q=<text>&department=&store=&status=&limit=20&offset=0`
+
+Paginated search over every stored product, newest first. Each query word must
+match the product's **name, info, category, or tags**. `department`, `store` and
+`status` are comma-separated multi-selects that further narrow the set:
+
+- `department=laundry,frozen` — one of the fixed aisles (`src/departments.js`)
+- `store=Walmart,Food Basics` — exact store name
+- `status=valid,expired` — `valid` \| `upcoming` \| `expired` \| `unknown`,
+  computed from the flyer dates vs. the server's clock
+- `sale=1` — only products with a `wasPrice` or `promoText`
+
+```jsonc
+{
   "products": [
-    { "id": "1-0", "page": 1, "name": "Corn", "price": "34¢", "priceValue": 0.34,
-      "info": "Each. Product of Canada.", "box": [230, 60, 360, 300] }
+    { "id": "…", "flyerId": "…", "page": 1, "name": "Corn", "price": "34¢",
+      "priceValue": 0.34, "info": "…", "box": [230,60,360,300], "confidence": 95,
+      "category": "corn", "tags": ["vegetable","produce","cob"],
+      "department": "vegetables",
+      "wasPrice": "48¢", "promoText": "Save 14¢", "onSale": true,
+      "store": "Food Basics", "validFrom": "2026-08-27", "validTo": "2026-09-02",
+      "thumb": "http://<host>/thumbs/<flyerId>/<id>.jpg" }
   ],
-  "usage": { "model": "gemini-3.1-flash-lite", "total": { "totalTokens": 2806, "...": "..." } },
-  "meta": { "totalPages": 1, "renderedPages": 1 }
+  "pages": [
+    { "flyerId": "…", "page": 1, "width": 1592, "height": 2060,
+      "image": "http://<host>/pages/<flyerId>/1.jpg" }
+  ],
+  "total": 207, "hasMore": true
 }
 ```
 
 `box` is `[ymin, xmin, ymax, xmax]`, each 0–1000, normalized to that page's
-`width`/`height`. Page images are returned inline as base64 data URIs so the app
-can crop product tiles from them; for very large catalogues switch to serving
-them as files.
+`width`/`height`. `thumb` is the product's crop (or `null`); `pages` holds the
+distinct full pages referenced by this result set (for the source-page view).
+
+### `GET /filters?q=&department=&store=&status=`
+
+Options for the app's filter modal, each list `[{ value, count }]`, plus the
+`total` the whole selection returns:
+
+```jsonc
+{
+  "departments": [{ "value": "pantry", "count": 47 }, …],
+  "stores":      [{ "value": "Food Basics", "count": 294 }],
+  "statuses":    [{ "value": "valid", "count": 294 }, { "value": "expired", "count": 432 }],
+  "saleCount": 61,
+  "total": 294
+}
+```
+
+Takes the same filter params as `/products`. Counts are **faceted**: each
+section's numbers reflect the *other* sections' selections but not its own, so
+an untouched section is never a constraint and picking within a section never
+zeroes its own rows. `statuses` omits any state no matching product is in.
+
+### `GET /departments`
+
+`{ "departments": [{ "department": "pantry", "count": 80 }, …] }` — every aisle
+that has products, busiest first.
+
+### `GET /pages/<flyerId>/<page>.jpg` · `GET /thumbs/<flyerId>/<id>.jpg`
+
+The rendered page image and per-product crop (static files).
 
 ### `GET /health`
 
-`{ "ok": true, "gemini": "configured" | "missing" }`
+`{ "ok": true, "gemini": "configured" | "missing", "products": 207 }`
 
 ## Config (`.env`)
 
@@ -58,7 +201,8 @@ them as files.
 | `GEMINI_API_KEY` | — | Required. `MOCK` for canned data. |
 | `GEMINI_MODEL` | `gemini-3.1-flash-lite` | Any vision-capable Gemini model. |
 | `PAGES_PER_REQUEST` | `1` | Pages per Gemini call, clamped 1–4. Above 3 recall drops. |
-| `PORT` | `3001` | Must match the app's `EXPO_PUBLIC_API_BASE_URL`. |
+| `MAX_UPLOAD_MB` | `50` | Largest flyer PDF accepted. Held in memory — keep in sync with `MAX_UPLOAD_MB` in the app's `src/config.ts`. |
+| `PORT` | `3001` | Must match `LAN_HOST`/`PORT` in the app's `src/config.ts`. |
 
 Per-run token usage is logged to the console and appended to
 `server/logs/gemini-usage.jsonl`.

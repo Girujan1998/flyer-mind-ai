@@ -1,10 +1,13 @@
 import * as mupdf from 'mupdf';
 
-// Matches the browser renderer in repos/SandboxDemos/flyer-ocr-extractor
-// (src/lib/pdf.js): cap the long edge at 1600 px, never upscale past 2x, JPEG.
-const MAX_DIMENSION = 1600;
-const MAX_SCALE = 2.0;
-const JPEG_QUALITY = 82;
+// Render pages large enough for Gemini to read superscript cents, SKU numbers
+// and pack sizes — the small text is where the misreads come from. ~2000 px on
+// the long edge is Gemini's document sweet spot; MAX_DIMENSION guards oversized
+// pages. (flyer-ocr-extractor used 1600 / 2x, which for a Letter page capped at
+// ~1224 px — too small for the fine print.)
+const MAX_DIMENSION = 2400;
+const MAX_SCALE = 2.6;
+const JPEG_QUALITY = 85;
 
 // Runaway guard for an absurdly long PDF; real flyers are far under it.
 const DEFAULT_MAX_PAGES = 200;
@@ -44,14 +47,16 @@ export function renderPdf(buffer, options = {}) {
         page: i + 1,
         width: pixmap.getWidth(),
         height: pixmap.getHeight(),
-        jpegBase64: Buffer.from(pixmap.asJPEG(JPEG_QUALITY, false)).toString('base64'),
+        jpegBase64: Buffer.from(pixmap.asJPEG(JPEG_QUALITY, false)).toString(
+          'base64',
+        ),
       });
 
       pixmap.destroy();
       page.destroy();
     }
 
-    return { pages, totalPages, renderedPages };
+    return {pages, totalPages, renderedPages};
   } finally {
     doc.destroy();
   }
@@ -59,6 +64,8 @@ export function renderPdf(buffer, options = {}) {
 
 function clampInt(value, fallback, lo, hi) {
   const n = parseInt(value, 10);
-  if (Number.isNaN(n)) return fallback;
+  if (Number.isNaN(n)) {
+    return fallback;
+  }
   return Math.max(lo, Math.min(hi, n));
 }

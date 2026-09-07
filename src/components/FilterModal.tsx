@@ -1,0 +1,362 @@
+import React, {useEffect, useRef, useState} from 'react';
+import {
+  Modal,
+  Pressable,
+  ScrollView,
+  StyleSheet,
+  Text,
+  View,
+} from 'react-native';
+
+import {
+  EMPTY_FILTERS,
+  FilterFacets,
+  ProductFilters,
+  countActiveFilters,
+  fetchFilterFacets,
+} from '../api/extract';
+import {Palette, fonts, radius, spacing, useThemedStyles} from '../theme';
+
+type Props = {
+  visible: boolean;
+  /** Unfiltered options, shown until the live (faceted) counts arrive. */
+  facets: FilterFacets;
+  /** The active search query — facet counts respect it too. */
+  query: string;
+  value: ProductFilters;
+  onApply: (next: ProductFilters) => void;
+  onClose: () => void;
+};
+
+const STATUS_LABEL: Record<string, string> = {
+  valid: 'Active',
+  upcoming: 'Upcoming',
+  expired: 'Expired',
+  unknown: 'Unknown / no dates',
+};
+
+const titleCase = (s: string) => s.replace(/\b\w/g, c => c.toUpperCase());
+
+function toggle(list: string[], v: string): string[] {
+  return list.includes(v) ? list.filter(x => x !== v) : [...list, v];
+}
+
+function FilterModal({
+  visible,
+  facets,
+  query,
+  value,
+  onApply,
+  onClose,
+}: Props): React.JSX.Element {
+  const {styles} = useThemedStyles(makeStyles);
+  const [draft, setDraft] = useState<ProductFilters>(value);
+  const [live, setLive] = useState<FilterFacets>(facets);
+
+  // reseed the draft each time the sheet opens
+  useEffect(() => {
+    if (visible) {
+      setDraft(value);
+    }
+  }, [visible, value]);
+
+  // faceted counts: refetch (debounced) whenever the draft or query changes
+  const reqId = useRef(0);
+  useEffect(() => {
+    if (!visible) {
+      return;
+    }
+    const id = ++reqId.current;
+    const t = setTimeout(() => {
+      fetchFilterFacets(draft, query)
+        .then(next => {
+          if (id === reqId.current) {
+            setLive(next);
+          }
+        })
+        .catch(() => {});
+    }, 220);
+    return () => clearTimeout(t);
+  }, [visible, draft, query]);
+
+  const active = countActiveFilters(draft);
+  const shown = live ?? facets;
+
+  const section = (
+    title: string,
+    facetList: {value: string; count: number}[],
+    selected: string[],
+    onToggle: (v: string) => void,
+    labelFor: (v: string) => string,
+  ) => {
+    // keep a selected option visible even if it now has 0 matches, and show the
+    // whole list alphabetically by its display label
+    const rows = [
+      ...facetList,
+      ...selected
+        .filter(s => !facetList.some(f => f.value === s))
+        .map(s => ({value: s, count: 0})),
+    ].sort((a, b) =>
+      labelFor(a.value).localeCompare(labelFor(b.value), undefined, {
+        sensitivity: 'base',
+      }),
+    );
+    if (rows.length === 0) {
+      return null;
+    }
+    return (
+      <View style={styles.section}>
+        <Text style={styles.sectionTitle}>{title}</Text>
+        {rows.map(f => {
+          const on = selected.includes(f.value);
+          return (
+            <Pressable
+              key={f.value}
+              onPress={() => onToggle(f.value)}
+              accessibilityRole="checkbox"
+              accessibilityState={{checked: on}}
+              style={({pressed}) => [styles.row, pressed && styles.rowPressed]}>
+              <View style={[styles.box, on && styles.boxOn]}>
+                {on ? <View style={styles.tick} /> : null}
+              </View>
+              <Text style={styles.rowLabel}>{labelFor(f.value)}</Text>
+              <Text style={[styles.rowCount, f.count === 0 && styles.rowZero]}>
+                {f.count}
+              </Text>
+            </Pressable>
+          );
+        })}
+      </View>
+    );
+  };
+
+  const total = shown?.total ?? 0;
+  const applyText =
+    active === 0
+      ? 'Show all products'
+      : total === 0
+      ? 'No products match'
+      : `Show ${total} result${total === 1 ? '' : 's'}`;
+
+  return (
+    <Modal
+      visible={visible}
+      animationType="slide"
+      transparent
+      onRequestClose={onClose}>
+      <View style={styles.backdrop}>
+        <Pressable style={styles.backdropFill} onPress={onClose} />
+        <View style={styles.sheet}>
+          <View style={styles.header}>
+            <Text style={styles.title}>Filter</Text>
+            <Pressable
+              onPress={onClose}
+              accessibilityRole="button"
+              accessibilityLabel="Close"
+              hitSlop={8}
+              style={styles.close}>
+              <View style={[styles.closeBar, styles.closeBarA]} />
+              <View style={[styles.closeBar, styles.closeBarB]} />
+            </Pressable>
+          </View>
+
+          <Text style={styles.hint}>
+            Leave a section untouched to include everything in it.
+          </Text>
+
+          <ScrollView
+            style={styles.body}
+            contentContainerStyle={styles.bodyContent}>
+            <View style={styles.section}>
+              <Text style={styles.sectionTitle}>Offer</Text>
+              <Pressable
+                onPress={() => setDraft(d => ({...d, onSale: !d.onSale}))}
+                accessibilityRole="checkbox"
+                accessibilityState={{checked: draft.onSale}}
+                style={({pressed}) => [
+                  styles.row,
+                  pressed && styles.rowPressed,
+                ]}>
+                <View style={[styles.box, draft.onSale && styles.boxOn]}>
+                  {draft.onSale ? <View style={styles.tick} /> : null}
+                </View>
+                <Text style={styles.rowLabel}>On sale only</Text>
+                <Text
+                  style={[
+                    styles.rowCount,
+                    (shown.saleCount ?? 0) === 0 && styles.rowZero,
+                  ]}>
+                  {shown.saleCount ?? 0}
+                </Text>
+              </Pressable>
+            </View>
+            {section(
+              'Status',
+              shown.statuses,
+              draft.statuses,
+              v => setDraft(d => ({...d, statuses: toggle(d.statuses, v)})),
+              v => STATUS_LABEL[v] ?? titleCase(v),
+            )}
+            {section(
+              'Category',
+              shown.departments,
+              draft.departments,
+              v =>
+                setDraft(d => ({...d, departments: toggle(d.departments, v)})),
+              titleCase,
+            )}
+            {section(
+              'Store',
+              shown.stores,
+              draft.stores,
+              v => setDraft(d => ({...d, stores: toggle(d.stores, v)})),
+              v => v,
+            )}
+          </ScrollView>
+
+          <View style={styles.footer}>
+            <Pressable
+              onPress={() => setDraft(EMPTY_FILTERS)}
+              disabled={active === 0}
+              style={({pressed}) => [
+                styles.reset,
+                active === 0 && styles.resetOff,
+                pressed && styles.rowPressed,
+              ]}>
+              <Text style={styles.resetText}>Reset</Text>
+            </Pressable>
+            <Pressable
+              onPress={() => onApply(draft)}
+              style={({pressed}) => [styles.apply, pressed && styles.applyOn]}>
+              <Text style={styles.applyText}>{applyText}</Text>
+            </Pressable>
+          </View>
+        </View>
+      </View>
+    </Modal>
+  );
+}
+
+const makeStyles = (c: Palette) =>
+  StyleSheet.create({
+    backdrop: {
+      flex: 1,
+      backgroundColor: c.scrim,
+      justifyContent: 'flex-end',
+    },
+    backdropFill: {flex: 1},
+    sheet: {
+      backgroundColor: c.surface,
+      borderTopLeftRadius: radius.lg,
+      borderTopRightRadius: radius.lg,
+      maxHeight: '85%',
+    },
+    header: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+      paddingHorizontal: spacing.md,
+      paddingTop: spacing.md,
+      paddingBottom: spacing.sm,
+    },
+    title: {
+      fontFamily: fonts.display,
+      fontSize: 18,
+      fontWeight: '700',
+      color: c.text,
+    },
+    close: {
+      width: 24,
+      height: 24,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    closeBar: {
+      position: 'absolute',
+      width: 16,
+      height: 2,
+      borderRadius: 1,
+      backgroundColor: c.textMuted,
+    },
+    closeBarA: {transform: [{rotate: '45deg'}]},
+    closeBarB: {transform: [{rotate: '-45deg'}]},
+    hint: {
+      fontSize: 12,
+      color: c.textMuted,
+      paddingHorizontal: spacing.md,
+      paddingBottom: spacing.sm,
+      borderBottomWidth: 1,
+      borderBottomColor: c.border,
+    },
+    body: {alignSelf: 'stretch'},
+    bodyContent: {padding: spacing.md, paddingBottom: spacing.lg},
+    section: {marginBottom: spacing.lg},
+    sectionTitle: {
+      fontSize: 11,
+      fontWeight: '700',
+      letterSpacing: 0.6,
+      textTransform: 'uppercase',
+      color: c.textMuted,
+      marginBottom: spacing.xs,
+    },
+    row: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: spacing.sm,
+      paddingVertical: 10,
+    },
+    rowPressed: {opacity: 0.6},
+    box: {
+      width: 20,
+      height: 20,
+      borderRadius: 6,
+      borderWidth: 1.5,
+      borderColor: c.border,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    boxOn: {backgroundColor: c.primary, borderColor: c.primary},
+    tick: {width: 8, height: 8, borderRadius: 2, backgroundColor: '#fff'},
+    rowLabel: {flex: 1, fontSize: 15, color: c.text},
+    rowCount: {
+      fontSize: 13,
+      color: c.textMuted,
+      fontVariant: ['tabular-nums'],
+    },
+    rowZero: {opacity: 0.4},
+    footer: {
+      flexDirection: 'row',
+      gap: spacing.sm,
+      padding: spacing.md,
+      borderTopWidth: 1,
+      borderTopColor: c.border,
+    },
+    reset: {
+      minHeight: 48,
+      paddingHorizontal: spacing.lg,
+      borderRadius: radius.md,
+      borderWidth: 1,
+      borderColor: c.border,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    resetOff: {opacity: 0.4},
+    resetText: {fontSize: 15, fontWeight: '600', color: c.textMuted},
+    apply: {
+      flex: 1,
+      minHeight: 48,
+      borderRadius: radius.md,
+      backgroundColor: c.primary,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    applyOn: {opacity: 0.85},
+    applyText: {
+      fontFamily: fonts.bold,
+      fontSize: 15,
+      fontWeight: '700',
+      color: c.onPrimary,
+    },
+  });
+
+export default FilterModal;

@@ -1,9 +1,4 @@
-import { Asset } from 'expo-asset';
-
-import mockFlyerPage from '../../assets/mock-flyer-page.jpg';
-import sampleFlyerPdf from '../../assets/sample-flyer.pdf';
-
-import { env } from '@/config/env';
+import {API_BASE_URL} from '../config';
 
 export type SelectedPdf = {
   uri: string;
@@ -12,99 +7,291 @@ export type SelectedPdf = {
   mimeType?: string;
 };
 
-/** Gemini box: `[ymin, xmin, ymax, xmax]`, normalized to 0–1000 of the page image. */
+/** Gemini box: `[ymin, xmin, ymax, xmax]`, normalized to 0-1000 of the page image. */
 export type GeminiBox = [number, number, number, number];
 
 export type Product = {
   id: string;
+  flyerId: string;
   page: number;
   name: string;
   /** Display price string, e.g. "34¢" or "$5.44". */
   price: string;
-  /** Price as a number so a superscript "5⁴⁴" can't come back as 544; null if unknown. */
+  /** Price as a number; null if unknown. */
   priceValue: number | null;
   /** Size / pack detail, e.g. "Each. Product of Canada." */
   info: string;
   box: GeminiBox | null;
+  /** Model's 0-100 self-rated confidence; null if not reported. */
+  confidence: number | null;
+  /** Brand-stripped generic type, e.g. "body spray deodorant"; '' if unknown. */
+  category: string;
+  /** Extra lowercase search terms (synonyms, aisle words); [] if none. */
+  tags: string[];
+  /** Coarse store aisle, e.g. "laundry", "fruit"; '' if unknown. */
+  department: string;
+  /** Struck-through regular price when the tile shows one, e.g. "$5.99"; '' otherwise. */
+  wasPrice: string;
+  /** Verbatim deal callout, e.g. "Save $2", "2 for $5"; '' if none. */
+  promoText: string;
+  /** True when the tile explicitly frames this as a deal (wasPrice or promoText). */
+  onSale: boolean;
+  /** URL of a small pre-cropped thumbnail of this product; null if none. */
+  thumb: string | null;
+  /** Store this flyer is for, e.g. "Food Basics"; '' if unknown. */
+  store: string;
+  /** First day the flyer prices are in effect, "YYYY-MM-DD"; '' if unknown. */
+  validFrom: string;
+  /** Last day the flyer prices are in effect, "YYYY-MM-DD"; '' if unknown. */
+  validTo: string;
 };
 
 export type FlyerPage = {
+  flyerId: string;
   page: number;
   /** Pixel size of `image` — bounding boxes are placed against this. */
   width: number;
   height: number;
-  /** Remote URL / data URI of the rasterized page (a bundled asset in mock mode). */
-  image: string | number;
+  /** Absolute URL of the rasterized page JPEG. */
+  image: string;
 };
 
-export type ExtractResult = {
-  pages: FlyerPage[];
-  products: Product[];
-};
+/** Key a page (or a product's page) in a lookup map. */
+export const pageKey = (flyerId: string, page: number) => `${flyerId}:${page}`;
 
-export type ExtractOptions = {
-  /**
-   * Skip the network and return canned data — mirrors the server's
-   * `GEMINI_API_KEY=MOCK` path. Off by default; the "try a sample flyer" link
-   * passes `true` so it works with no server running.
-   */
-  mock?: boolean;
+export class NoServerError extends Error {}
+
+/** Thrown when a request is cancelled via its AbortSignal. */
+export class AbortedError extends Error {
+  constructor() {
+    super('Cancelled');
+    this.name = 'AbortedError';
+  }
+}
+
+async function api<T>(path: string, init?: RequestInit): Promise<T> {
+  let response: Response;
+  try {
+    response = await fetch(`${API_BASE_URL}${path}`, init);
+  } catch (err) {
+    if (
+      (err as {name?: string} | null)?.name === 'AbortError' ||
+      init?.signal?.aborted
+    ) {
+      throw new AbortedError();
+    }
+    throw new NoServerError(
+      `Can't reach the extraction server at ${API_BASE_URL}. Is it running?`,
+    );
+  }
+  const data = (await response.json().catch(() => null)) as
+    | (T & {error?: string})
+    | null;
+  if (!response.ok || !data) {
+    throw new Error(data?.error || `Request failed (${response.status})`);
+  }
+  return data;
+}
+
+export type UploadResult = {
+  flyerId: string;
+  name: string;
+  savedProducts: number;
+  renderedPages: number;
+  totalPages: number;
+  /** Store the flyer is for, e.g. "Food Basics"; '' if the model couldn't tell. */
+  store: string;
+  /** Price-validity window, "YYYY-MM-DD"; '' if not printed on page 1. */
+  validFrom: string;
+  validTo: string;
+  failedPages: number[];
+  /** true when this exact PDF was already stored — not re-extracted. */
+  reused: boolean;
 };
 
 /**
- * Upload a flyer PDF to the extraction API (`server/`), which rasterizes each
- * page and runs Gemini vision, and get back `{ pages, products }`.
+ * Upload a flyer PDF. The server rasterizes each page, runs Gemini vision, and
+ * SAVES the products + bounding boxes to its database. Returns a summary only —
+ * browse the products on the Search screen.
  */
-export async function extractFlyer(
+export function extractFlyer(
   file: SelectedPdf,
-  options: ExtractOptions = {},
-): Promise<ExtractResult> {
-  if (options.mock) {
-    await new Promise((resolve) => setTimeout(resolve, 1400));
-    return MOCK_RESULT;
-  }
-
+  signal?: AbortSignal,
+): Promise<UploadResult> {
   const form = new FormData();
   form.append('file', {
     uri: file.uri,
     name: file.name || 'flyer.pdf',
     type: file.mimeType || 'application/pdf',
-    // React Native's FormData accepts this file shape; the DOM lib types don't.
   } as unknown as Blob);
-
-  let response: Response;
-  try {
-    response = await fetch(`${env.apiBaseUrl}/flyers/extract`, { method: 'POST', body: form });
-  } catch {
-    throw new NoServerError(
-      `Can't reach the extraction server at ${env.apiBaseUrl}. Is it running?`,
-    );
-  }
-
-  const data = (await response.json().catch(() => null)) as
-    | (ExtractResult & { error?: string })
-    | null;
-
-  if (!response.ok || !data) {
-    throw new Error(data?.error || `Extraction failed (${response.status})`);
-  }
-  return { pages: data.pages, products: data.products };
+  return api<UploadResult>('/flyers/extract', {
+    method: 'POST',
+    body: form,
+    signal,
+  });
 }
 
-export class NoServerError extends Error {}
+export type SearchResult = {
+  products: Product[];
+  pages: FlyerPage[];
+  total: number;
+  hasMore: boolean;
+};
+
+/** The filters currently applied on the Search screen. */
+export type ProductFilters = {
+  departments: string[];
+  stores: string[];
+  statuses: string[];
+  /** Show only products the flyer explicitly frames as a deal. */
+  onSale: boolean;
+};
+
+export const EMPTY_FILTERS: ProductFilters = {
+  departments: [],
+  stores: [],
+  statuses: [],
+  onSale: false,
+};
+
+export function countActiveFilters(f: ProductFilters): number {
+  return (
+    f.departments.length +
+    f.stores.length +
+    f.statuses.length +
+    (f.onSale ? 1 : 0)
+  );
+}
+
+// RN's URLSearchParams polyfill has no `.set()`, so build the string by hand.
+function filtersToQuery(f: ProductFilters): string[] {
+  const csv = (key: string, vals: string[]) =>
+    vals.length ? `${key}=${vals.map(encodeURIComponent).join(',')}` : '';
+  return [
+    csv('department', f.departments),
+    csv('store', f.stores),
+    csv('status', f.statuses),
+    f.onSale ? 'sale=1' : '',
+  ];
+}
+
+/** Paginated + text search over every stored product, newest first. */
+export function searchProducts(params: {
+  q?: string;
+  filters?: ProductFilters;
+  limit?: number;
+  offset?: number;
+}): Promise<SearchResult> {
+  const f = params.filters ?? EMPTY_FILTERS;
+  const qs = [
+    `limit=${params.limit ?? 20}`,
+    `offset=${params.offset ?? 0}`,
+    params.q ? `q=${encodeURIComponent(params.q)}` : '',
+    ...filtersToQuery(f),
+  ]
+    .filter(Boolean)
+    .join('&');
+  return api<SearchResult>(`/products?${qs}`);
+}
+
+/** One selectable filter value and how many products carry it. */
+export type Facet = {value: string; count: number};
+
+export type FilterFacets = {
+  departments: Facet[];
+  stores: Facet[];
+  statuses: Facet[];
+  /** How many of the (otherwise-filtered) products are on sale. */
+  saleCount: number;
+  /** How many products the whole current selection returns. */
+  total: number;
+};
 
 /**
- * The bundled sample flyer (`assets/sample-flyer.pdf`) as an uploadable file —
- * backs the "try a sample flyer" link so it runs the real pipeline.
+ * Options for the filter modal. Counts are faceted against `applied` (and `q`):
+ * each list reflects the other sections' picks, so an untouched section is never
+ * a constraint and its own picks never zero its rows. Pass nothing for the
+ * unfiltered totals.
  */
-export async function sampleFlyerFile(): Promise<SelectedPdf> {
-  const asset = Asset.fromModule(sampleFlyerPdf);
-  if (!asset.localUri) await asset.downloadAsync();
-  return {
-    uri: asset.localUri ?? asset.uri,
-    name: 'Sample Walmart flyer.pdf',
-    mimeType: 'application/pdf',
-  };
+export function fetchFilterFacets(
+  applied: ProductFilters = EMPTY_FILTERS,
+  q = '',
+): Promise<FilterFacets> {
+  const qs = [q ? `q=${encodeURIComponent(q)}` : '', ...filtersToQuery(applied)]
+    .filter(Boolean)
+    .join('&');
+  return api<FilterFacets>(`/filters${qs ? `?${qs}` : ''}`);
+}
+
+const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
+
+/** Today as a local "YYYY-MM-DD" — comparable directly against flyer dates. */
+export function todayIso(): string {
+  const d = new Date();
+  const p = (n: number) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+}
+
+/**
+ * Where today sits relative to a flyer's price window:
+ * - `upcoming` — the start date is still in the future
+ * - `valid`    — today is within [from, to] (both days included)
+ * - `expired`  — today is past the end date
+ * - `unknown`  — no usable dates on the flyer
+ */
+export type FlyerStatus = 'valid' | 'expired' | 'upcoming' | 'unknown';
+
+export function flyerStatus(from: string, to: string): FlyerStatus {
+  const hasFrom = ISO_DATE.test(from);
+  const hasTo = ISO_DATE.test(to);
+  if (!hasFrom && !hasTo) {
+    return 'unknown';
+  }
+  const t = todayIso();
+  if (hasFrom && from > t) {
+    return 'upcoming';
+  }
+  if (hasTo && t > to) {
+    return 'expired';
+  }
+  return 'valid';
+}
+
+/** True when today falls within [from, to], both days included. */
+export function isFlyerValid(from: string, to: string): boolean {
+  return flyerStatus(from, to) === 'valid';
+}
+
+/** "Sep 2" — short month + day, or '' if not a usable "YYYY-MM-DD". */
+export function formatShortDate(iso: string): string {
+  if (!ISO_DATE.test(iso)) {
+    return '';
+  }
+  return new Date(`${iso}T00:00:00`).toLocaleDateString('en-US', {
+    month: 'short',
+    day: 'numeric',
+  });
+}
+
+/**
+ * Format a flyer validity window for display, e.g. "Aug 27 – Sep 2, 2026".
+ * Returns '' if neither date is a usable "YYYY-MM-DD".
+ */
+export function formatValidity(from: string, to: string): string {
+  const a = ISO_DATE.test(from) ? new Date(`${from}T00:00:00`) : null;
+  const b = ISO_DATE.test(to) ? new Date(`${to}T00:00:00`) : null;
+  if (!a && !b) {
+    return '';
+  }
+  const md = (d: Date) =>
+    d.toLocaleDateString('en-US', {month: 'short', day: 'numeric'});
+  if (a && b) {
+    return from === to
+      ? `${md(a)}, ${a.getFullYear()}`
+      : `${md(a)} – ${md(b)}, ${b.getFullYear()}`;
+  }
+  const one = (a ?? b) as Date;
+  return `${md(one)}, ${one.getFullYear()}`;
 }
 
 /** Convert a Gemini box to a pixel rect on the page, padded and clamped. */
@@ -113,131 +300,25 @@ export function boxToRect(
   pageWidth: number,
   pageHeight: number,
   padding = 0,
-): { x: number; y: number; width: number; height: number } | null {
-  if (!box || box.length !== 4) return null;
+): {x: number; y: number; width: number; height: number} | null {
+  if (!box || box.length !== 4) {
+    return null;
+  }
   const [ymin, xmin, ymax, xmax] = box;
   const x0 = Math.max(0, (Math.min(xmin, xmax) / 1000) * pageWidth - padding);
   const y0 = Math.max(0, (Math.min(ymin, ymax) / 1000) * pageHeight - padding);
-  const x1 = Math.min(pageWidth, (Math.max(xmin, xmax) / 1000) * pageWidth + padding);
-  const y1 = Math.min(pageHeight, (Math.max(ymin, ymax) / 1000) * pageHeight + padding);
+  const x1 = Math.min(
+    pageWidth,
+    (Math.max(xmin, xmax) / 1000) * pageWidth + padding,
+  );
+  const y1 = Math.min(
+    pageHeight,
+    (Math.max(ymin, ymax) / 1000) * pageHeight + padding,
+  );
   const width = x1 - x0;
   const height = y1 - y0;
-  if (width <= 1 || height <= 1) return null;
-  return { x: x0, y: y0, width, height };
+  if (width <= 1 || height <= 1) {
+    return null;
+  }
+  return {x: x0, y: y0, width, height};
 }
-
-// --- Mock data: the sample Walmart flyer (assets/mock-flyer-page.jpg, 772×1000) ---
-
-const MOCK_RESULT: ExtractResult = {
-  pages: [{ page: 1, width: 1000, height: 1295, image: mockFlyerPage }],
-  products: [
-    {
-      id: '1-corn',
-      page: 1,
-      name: 'Corn',
-      price: '34¢',
-      priceValue: 0.34,
-      info: 'Each. Product of Canada. Canada No. 1.',
-      box: [168, 52, 275, 182],
-    },
-    {
-      id: '1-peaches',
-      page: 1,
-      name: 'Peaches 3 L or nectarines 2 L',
-      price: '$5.44',
-      priceValue: 5.44,
-      info: 'Each. Product of Canada. Canada No. 1.',
-      box: [168, 190, 275, 335],
-    },
-    {
-      id: '1-blueberries',
-      page: 1,
-      name: 'Blueberries',
-      price: '$3.44',
-      priceValue: 3.44,
-      info: 'Pack. Product of Canada. Canada No. 1.',
-      box: [278, 52, 380, 182],
-    },
-    {
-      id: '1-watermelon',
-      page: 1,
-      name: 'Large seedless watermelon',
-      price: '$4.98',
-      priceValue: 4.98,
-      info: 'Each. Product of Canada or USA. Average 5 kg.',
-      box: [278, 190, 380, 470],
-    },
-    {
-      id: '1-chicken',
-      page: 1,
-      name: 'Maple Leaf fresh chicken leg quarters',
-      price: '$3.17',
-      priceValue: 3.17,
-      info: '$6.98/kg.',
-      box: [388, 52, 490, 180],
-    },
-    {
-      id: '1-bacon',
-      page: 1,
-      name: 'Great Value bacon',
-      price: '$3.97',
-      priceValue: 3.97,
-      info: 'Each. Selected varieties. 375 g.',
-      box: [388, 188, 490, 325],
-    },
-    {
-      id: '1-sausages',
-      page: 1,
-      name: 'Lafleur pork and beef sausages',
-      price: '$8.98',
-      priceValue: 8.98,
-      info: 'Each. 1 kg. While quantities last.',
-      box: [388, 333, 490, 470],
-    },
-    {
-      id: '1-milk',
-      page: 1,
-      name: 'Sealtest 1% chocolate milk',
-      price: '98¢',
-      priceValue: 0.98,
-      info: 'Each. 750 mL.',
-      box: [536, 52, 630, 190],
-    },
-    {
-      id: '1-silk',
-      page: 1,
-      name: 'Silk Almond, Cashew or Protein soy beverage',
-      price: '$3.98',
-      priceValue: 3.98,
-      info: 'Each. Selected varieties. 1.75–1.89 L.',
-      box: [536, 198, 630, 335],
-    },
-    {
-      id: '1-cereal',
-      page: 1,
-      name: 'General Mills family size cereal',
-      price: '$4.97',
-      priceValue: 4.97,
-      info: 'Each. Selected varieties and sizes.',
-      box: [536, 343, 630, 475],
-    },
-    {
-      id: '1-chips',
-      page: 1,
-      name: "Lay's chips",
-      price: '$2.97',
-      priceValue: 2.97,
-      info: 'Each. Selected flavours. 220–235 g.',
-      box: [752, 52, 845, 190],
-    },
-    {
-      id: '1-gatorade',
-      page: 1,
-      name: 'Gatorade',
-      price: '$6.27',
-      priceValue: 6.27,
-      info: 'Pack. Selected flavours. 6 x 591 mL.',
-      box: [752, 198, 845, 335],
-    },
-  ],
-};

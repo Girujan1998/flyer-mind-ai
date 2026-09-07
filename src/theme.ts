@@ -1,0 +1,151 @@
+import {useMemo} from 'react';
+import {useColorScheme} from 'react-native';
+
+/**
+ * "Market" theme — warm oat grounds, a deep grocery green, a ripe-tomato accent
+ * reserved for deals, with a matching dark palette.
+ */
+export type Palette = {
+  background: string;
+  /** Cards, sheets, raised surfaces. */
+  surface: string;
+  /** Inputs, chips, nested fills. */
+  surfaceAlt: string;
+  /** Product-crop backdrop (kept near-white so photos read). */
+  imageBackdrop: string;
+  border: string;
+  text: string;
+  textMuted: string;
+  /** Grocery green — primary actions, "Active". */
+  primary: string;
+  primaryTint: string;
+  onPrimary: string;
+  /**
+   * Flyer-status dots on the search cards. Kept vivid and well apart in hue —
+   * live (green), upcoming (amber), expired (grey) — so they read at a glance.
+   */
+  statusLive: string;
+  statusUpcoming: string;
+  statusExpired: string;
+  /** Ripe tomato — on sale / SALE / promo. */
+  deal: string;
+  dealTint: string;
+  /** Destructive / errors. */
+  danger: string;
+  scrim: string;
+  /** The floating pill nav sits on an ink slab in both themes. */
+  navBackground: string;
+  navBorder: string;
+  navInactive: string;
+  navActiveText: string;
+};
+
+export const lightPalette: Palette = {
+  background: '#f5f3ec',
+  surface: '#ffffff',
+  surfaceAlt: '#efece2',
+  imageBackdrop: '#ffffff',
+  border: '#e7e3d8',
+  text: '#262420',
+  textMuted: '#5d584e',
+  primary: '#1f6b4a',
+  primaryTint: 'rgba(31, 107, 74, 0.12)',
+  onPrimary: '#ffffff',
+  statusLive: '#12a150',
+  statusUpcoming: '#e08b1e',
+  statusExpired: '#8a837a',
+  deal: '#df5230',
+  dealTint: 'rgba(223, 82, 48, 0.12)',
+  danger: '#c2401f',
+  scrim: 'rgba(26, 25, 22, 0.5)',
+  navBackground: '#262420',
+  navBorder: 'transparent',
+  navInactive: 'rgba(255, 255, 255, 0.6)',
+  navActiveText: '#ffffff',
+};
+
+export const darkPalette: Palette = {
+  // A darker ground so raised surfaces stand off it.
+  background: '#121110',
+  surface: '#26241f',
+  surfaceAlt: '#332f29',
+  imageBackdrop: '#f4f2ec',
+  border: 'rgba(239, 236, 227, 0.2)',
+  text: '#f1eee6',
+  textMuted: '#bab4a6',
+  primary: '#4fc78a',
+  primaryTint: 'rgba(79, 199, 138, 0.16)',
+  onPrimary: '#122019',
+  statusLive: '#3ddc84',
+  statusUpcoming: '#f5b342',
+  statusExpired: '#9a9186',
+  deal: '#ff7a52',
+  dealTint: 'rgba(255, 122, 82, 0.16)',
+  danger: '#f2867e',
+  scrim: 'rgba(0, 0, 0, 0.6)',
+  navBackground: '#0c0b0a',
+  navBorder: 'rgba(239, 236, 227, 0.12)',
+  navInactive: 'rgba(241, 238, 230, 0.6)',
+  navActiveText: '#0c0b0a',
+};
+
+export function useTheme(): {colors: Palette; dark: boolean} {
+  const dark = useColorScheme() === 'dark';
+  return {colors: dark ? darkPalette : lightPalette, dark};
+}
+
+/**
+ * Build a StyleSheet from the active palette. Returns the sheet plus the raw
+ * palette (for colors passed as props, e.g. ActivityIndicator).
+ *
+ *   const {styles, colors} = useThemedStyles(makeStyles);
+ *   const makeStyles = (c: Palette) => StyleSheet.create({ ... });
+ */
+export function useThemedStyles<T>(factory: (c: Palette) => T): {
+  styles: T;
+  colors: Palette;
+  dark: boolean;
+} {
+  const {colors, dark} = useTheme();
+  const styles = useMemo(() => factory(colors), [colors, factory]);
+  return {styles, colors, dark};
+}
+
+/** Static light palette — for non-component modules only. Prefer `useTheme()`. */
+export const colors = lightPalette;
+
+export const spacing = {
+  xs: 4,
+  sm: 8,
+  md: 16,
+  lg: 24,
+  xl: 32,
+};
+
+export const radius = {
+  sm: 10,
+  md: 14,
+  lg: 22,
+  pill: 999,
+};
+
+/**
+ * Flip to `true` once the .ttf files are bundled (assets/fonts + react-native
+ * config + `npx react-native-asset` + rebuild). Until then every `fonts.*` is
+ * `undefined`, so components fall back to the system font via `fontWeight`.
+ */
+export const FONTS_BUNDLED = true;
+
+const family = (name: string): string | undefined =>
+  FONTS_BUNDLED ? name : undefined;
+
+export const fonts = {
+  /** Bricolage Grotesque — prices, titles, mastheads. */
+  display: family('BricolageGrotesque-Bold'),
+  displaySemibold: family('BricolageGrotesque-SemiBold'),
+  /** Hanken Grotesk — everything else. */
+  body: family('HankenGrotesk-Regular'),
+  medium: family('HankenGrotesk-Medium'),
+  semibold: family('HankenGrotesk-SemiBold'),
+  bold: family('HankenGrotesk-Bold'),
+};
