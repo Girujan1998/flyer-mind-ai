@@ -445,18 +445,29 @@ function classifyQuery(q) {
     };
   } else if (
     db
-      .prepare(
-        `SELECT 1 FROM products p
-          WHERE headmatch(${CAT_EXPR}, ?) OR tagexact(${TAGS_EXPR}, ?)
-          LIMIT 1`,
-      )
-      .get(raw, raw)
+      .prepare(`SELECT 1 FROM products p WHERE headmatch(${CAT_EXPR}, ?) LIMIT 1`)
+      .get(raw)
   ) {
+    // Something's category IS this ("salmon", "tomatoes") — show only those, not
+    // products that merely mention it (a "seafood" tile tagged "salmon").
+    out = {
+      mode: 'item',
+      conds: [`headmatch(${CAT_EXPR}, ?)`],
+      params: [raw],
+      scoreTerms: [raw],
+    };
+  } else if (
+    db
+      .prepare(`SELECT 1 FROM products p WHERE tagexact(${TAGS_EXPR}, ?) LIMIT 1`)
+      .get(raw)
+  ) {
+    // No product's category is this, but it's an exact tag — e.g. "onion" on a
+    // combo tile the categoriser filed under "vegetables".
     out = {
       mode: 'item',
       conds: [`(headmatch(${CAT_EXPR}, ?) OR tagexact(${TAGS_EXPR}, ?))`],
       params: [raw, raw],
-      scoreTerms: [raw], // score the whole phrase, not its words
+      scoreTerms: [raw],
     };
   } else {
     const conds = [];
