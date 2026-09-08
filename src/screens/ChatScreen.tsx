@@ -3,6 +3,7 @@ import {
   ActivityIndicator,
   Dimensions,
   FlatList,
+  Image,
   Keyboard,
   KeyboardAvoidingView,
   Platform,
@@ -19,6 +20,7 @@ import {
   FlyerPage,
   NoServerError,
   Product,
+  flyerStatus,
   pageKey,
   sendChat,
 } from '../api/extract';
@@ -30,8 +32,11 @@ import {Palette, fonts, radius, spacing, useThemedStyles} from '../theme';
 
 /** Clearance so the transcript / composer clear the floating pill nav bar. */
 const NAV_CLEARANCE = 96;
-/** Cap products drawn inside one reply; the rest is a "refine on Search" hint. */
-const MAX_CARDS = 8;
+/**
+ * A reply shows the top FEATURED matches as full cards; anything past that
+ * collapses to a compact "+ N more" list. Below FEATURED + 2 it's all cards.
+ */
+const FEATURED = 4;
 const CARD_GAP = spacing.sm;
 const CARD_WIDTH =
   (Dimensions.get('window').width - spacing.md * 2 - CARD_GAP) / 2;
@@ -42,7 +47,6 @@ type ChatMessage = {
   text: string;
   products?: Product[];
   terms?: string[];
-  total?: number;
   pending?: boolean;
   error?: boolean;
 };
@@ -72,6 +76,73 @@ function buildHistory(all: ChatMessage[]): ChatTurn[] {
     }));
 }
 
+/** One line in the collapsed "+ N more" list — thumb, name, store, price. */
+function ProductRow({
+  product,
+  first,
+  onPress,
+}: {
+  product: Product;
+  first: boolean;
+  onPress: (p: Product) => void;
+}): React.JSX.Element {
+  const {styles} = useThemedStyles(makeStyles);
+  const expired = flyerStatus(product.validFrom, product.validTo) === 'expired';
+  const sub = [product.store, expired ? 'ended' : product.department]
+    .filter(Boolean)
+    .join(' · ');
+
+  return (
+    <Pressable
+      onPress={() => onPress(product)}
+      accessibilityRole="button"
+      accessibilityLabel={`${product.name || 'Unnamed item'}, ${
+        product.price || 'no price'
+      }`}
+      style={({pressed}) => [
+        styles.row,
+        first && styles.rowFirst,
+        expired && styles.rowExpired,
+        pressed && styles.pressed,
+      ]}>
+      <View style={styles.rowThumb}>
+        {product.thumb ? (
+          <Image
+            source={{uri: product.thumb}}
+            style={styles.rowThumbImg}
+            resizeMode="contain"
+          />
+        ) : null}
+      </View>
+      <View style={styles.rowMain}>
+        <Text style={styles.rowName} numberOfLines={1}>
+          {product.name || 'Unnamed item'}
+        </Text>
+        {sub ? (
+          <Text style={styles.rowSub} numberOfLines={1}>
+            {sub}
+          </Text>
+        ) : null}
+      </View>
+      {product.onSale ? (
+        <View style={[styles.rowTag, expired && styles.rowTagOff]}>
+          <Text style={[styles.rowTagText, expired && styles.rowTagTextOff]}>
+            SALE
+          </Text>
+        </View>
+      ) : null}
+      <Text
+        style={[
+          styles.rowPrice,
+          product.onSale && styles.rowPriceDeal,
+          expired && styles.rowPriceMuted,
+        ]}>
+        {product.price || '—'}
+      </Text>
+    </Pressable>
+  );
+}
+
 function ChatScreen(): React.JSX.Element {
   const {styles, colors} = useThemedStyles(makeStyles);
 
@@ -82,6 +153,8 @@ function ChatScreen(): React.JSX.Element {
   const [infoProduct, setInfoProduct] = useState<Product | null>(null);
   const [flyerProduct, setFlyerProduct] = useState<Product | null>(null);
   const [keyboardUp, setKeyboardUp] = useState(false);
+  /** Message ids whose "+ N more" list has been expanded. */
+  const [expanded, setExpanded] = useState<Set<string>>(new Set());
 
   const abortRef = useRef<AbortController | null>(null);
   const reqId = useRef(0);
@@ -162,7 +235,6 @@ function ChatScreen(): React.JSX.Element {
                 text: res.reply,
                 products: res.products,
                 terms: res.terms,
-                total: res.products.length, // server caps at 24; total shown in reply
               }
             : m,
         ),
@@ -214,8 +286,12 @@ function ChatScreen(): React.JSX.Element {
       );
     }
 
-    const shown = item.products?.slice(0, MAX_CARDS) ?? [];
-    const overflow = (item.products?.length ?? 0) - shown.length;
+    const products = item.products ?? [];
+    // 7+ matches: top FEATURED as cards, the tail behind a "+ N more" tap.
+    const split = products.length > FEATURED + 2;
+    const featured = split ? products.slice(0, FEATURED) : products;
+    const rest = split ? products.slice(FEATURED) : [];
+    const isOpen = expanded.has(item.id);
 
     return (
       <View style={styles.rowLeft}>
@@ -240,9 +316,9 @@ function ChatScreen(): React.JSX.Element {
           </View>
         )}
 
-        {shown.length ? (
+        {featured.length ? (
           <View style={styles.grid}>
-            {shown.map(p => (
+            {featured.map(p => (
               <ProductCard
                 key={p.id}
                 product={p}
@@ -250,12 +326,34 @@ function ChatScreen(): React.JSX.Element {
                 onPress={setInfoProduct}
               />
             ))}
-            {overflow > 0 ? (
-              <Text style={styles.more}>
-                +{overflow} more — narrow it down on the Search tab.
-              </Text>
-            ) : null}
           </View>
+        ) : null}
+
+        {rest.length ? (
+          isOpen ? (
+            <View style={styles.rows}>
+              {rest.map((p, i) => (
+                <ProductRow
+                  key={p.id}
+                  product={p}
+                  first={i === 0}
+                  onPress={setInfoProduct}
+                />
+              ))}
+            </View>
+          ) : (
+            <Pressable
+              onPress={() => setExpanded(prev => new Set(prev).add(item.id))}
+              accessibilityRole="button"
+              style={({pressed}) => [
+                styles.moreBtn,
+                pressed && styles.pressed,
+              ]}>
+              <Text style={styles.moreBtnText}>
+                + {rest.length} more {rest.length === 1 ? 'match' : 'matches'}
+              </Text>
+            </Pressable>
+          )
         ) : null}
       </View>
     );
@@ -400,12 +498,89 @@ const makeStyles = (c: Palette) =>
       gap: CARD_GAP,
       alignItems: 'stretch',
     },
-    more: {
-      width: '100%',
-      color: c.textMuted,
-      fontSize: 12,
-      paddingTop: 2,
+
+    moreBtn: {
+      alignSelf: 'stretch',
+      alignItems: 'center',
+      paddingVertical: spacing.sm + 2,
+      borderRadius: radius.md,
+      borderWidth: 1,
+      borderColor: c.border,
+      backgroundColor: c.surface,
     },
+    moreBtnText: {
+      color: c.primary,
+      fontFamily: fonts.semibold,
+      fontSize: 13,
+      fontWeight: '600',
+    },
+
+    rows: {
+      alignSelf: 'stretch',
+      borderWidth: 1,
+      borderColor: c.border,
+      borderRadius: radius.md,
+      backgroundColor: c.surface,
+      overflow: 'hidden',
+    },
+    row: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: spacing.sm,
+      paddingVertical: spacing.sm,
+      paddingHorizontal: spacing.sm + 2,
+      borderTopWidth: 1,
+      borderTopColor: c.border,
+    },
+    rowFirst: {borderTopWidth: 0},
+    rowExpired: {opacity: 0.62},
+    rowThumb: {
+      width: 40,
+      height: 40,
+      borderRadius: 8,
+      backgroundColor: c.imageBackdrop,
+      overflow: 'hidden',
+    },
+    rowThumbImg: {width: '100%', height: '100%'},
+    rowMain: {flex: 1, minWidth: 0},
+    rowName: {
+      color: c.text,
+      fontFamily: fonts.semibold,
+      fontSize: 13,
+      fontWeight: '600',
+    },
+    rowSub: {
+      color: c.textMuted,
+      fontSize: 11,
+      textTransform: 'capitalize',
+      marginTop: 1,
+    },
+    rowTag: {
+      paddingVertical: 2,
+      paddingHorizontal: 5,
+      borderRadius: 4,
+      backgroundColor: c.deal,
+    },
+    rowTagOff: {
+      backgroundColor: 'transparent',
+      borderWidth: 1,
+      borderColor: c.textMuted,
+    },
+    rowTagText: {
+      color: '#fff',
+      fontSize: 9,
+      fontWeight: '800',
+      letterSpacing: 0.4,
+    },
+    rowTagTextOff: {color: c.textMuted},
+    rowPrice: {
+      color: c.text,
+      fontFamily: fonts.display,
+      fontSize: 14,
+      fontWeight: '800',
+    },
+    rowPriceDeal: {color: c.deal},
+    rowPriceMuted: {color: c.textMuted},
 
     composer: {
       flexDirection: 'row',
