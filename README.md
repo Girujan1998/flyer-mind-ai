@@ -33,7 +33,7 @@ saves every product it finds with:
 - **store name + validity window** (one extra page-1 call) — "Prices in effect
   Aug 27 – Sep 2", so every product knows whether its flyer is active
 - **on-sale flag** — strict: only when the tile shows a struck-through price or
-  an explicit callout ("Save $2", "2 for $5", "Rollback"), not just a low price
+  an explicit callout ("Save $2", "2 for $5", "Clearance"), not just a low price
 
 Uploads survive a phone lock or Wi-Fi blip — the app reconnects to the same job
 for up to 5 minutes rather than starting a second (wasted) Gemini pass.

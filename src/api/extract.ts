@@ -38,7 +38,7 @@ export type Product = {
   onSale: boolean;
   /** URL of a small pre-cropped thumbnail of this product; null if none. */
   thumb: string | null;
-  /** Store this flyer is for, e.g. "Food Basics"; '' if unknown. */
+  /** Retailer this flyer is for (banner name); '' if unknown. */
   store: string;
   /** First day the flyer prices are in effect, "YYYY-MM-DD"; '' if unknown. */
   validFrom: string;
@@ -99,7 +99,7 @@ export type UploadResult = {
   savedProducts: number;
   renderedPages: number;
   totalPages: number;
-  /** Store the flyer is for, e.g. "Food Basics"; '' if the model couldn't tell. */
+  /** Retailer the flyer is for (banner name); '' if the model couldn't tell. */
   store: string;
   /** Price-validity window, "YYYY-MM-DD"; '' if not printed on page 1. */
   validFrom: string;

@@ -47,7 +47,7 @@ this tile, leave it empty / 0 rather than guessing.
 For each product:
 - "page": the page number (from the "=== PAGE N ===" label) the product appears on.
 - "name": the product name exactly as printed (brand + product line, e.g.
-  "Great Value bacon", "Silk Almond, Cashew or Protein soy beverage"). Copy the
+  "Store-brand bacon", "Almond, Cashew or Protein soy beverage"). Copy the
   printed text; do not summarise or turn it into a category.
 - "priceValue": the price as a NUMBER in dollars. Look carefully at each digit
   (a bold "3" and "7" are easy to confuse in flyer fonts). Flyers print the
@@ -67,7 +67,7 @@ For each product:
   price next to the current one, put that OLD price here as text ("$5.99").
   Empty string when there is no crossed-out price — most flyer tiles have none.
 - "promoText": the tile's explicit deal callout, copied short and verbatim —
-  "Save $2", "Save 30%", "2 for $5", "Buy 1 Get 1", "Rollback", "Clearance",
+  "Save $2", "Save 30%", "2 for $5", "Buy 1 Get 1", "Price drop", "Clearance",
   "Members price", "Spend $25 get 2000 points". Empty string if the tile just
   shows a plain price with no discount wording.
 - "box": this product tile's bounding box [ymin, xmin, ymax, xmax], each 0-1000,
@@ -118,9 +118,9 @@ function metaPrompt(year) {
   return `This is page 1 of a retail store flyer / weekly circular. Read only what is
 printed on this page and return ONE JSON object (not an array):
 
-- "store": the retailer name from the largest logo or masthead — the banner only
-  ("Walmart", "Food Basics", "No Frills", "Loblaws", "Costco"). No slogan, no
-  street address, no "Supercentre"/"Weekly Flyer" suffix. "" if no name is visible.
+- "store": the retailer name from the largest logo or masthead — the banner name
+  only. No slogan, no street address, no format/"Weekly Flyer" suffix. "" if no
+  name is visible.
 - "validFrom": the FIRST day the flyer's prices are in effect, as "YYYY-MM-DD".
   Flyers print this as "Prices in effect Thursday, August 28", "Valid Aug 28 –
   Sep 3", "Sale dates 08/28–09/03", "Semaine du 28 août". Take the START of the
