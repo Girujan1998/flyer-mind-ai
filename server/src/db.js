@@ -688,7 +688,9 @@ const STOP_TERMS = new Set([
   'bakery',
   'deli',
   'meat',
+  'poultry',
   'seafood',
+  'fish',
   'snacks',
   'household',
   'cleaning',
@@ -754,7 +756,12 @@ export function searchProductsExpanded(
     .join(' + ');
   const scoreBinds = terms.flatMap(t => [t, t]);
 
-  // Inclusion: broad = anywhere; item = category head or an exact tag.
+  // Inclusion: broad = whole word anywhere. item = the term is the product's
+  // category head ("salmon" for category "salmon") OR a complete tag entry
+  // ("salmon" tag on a "trout or salmon portions" combo tile) — so every real
+  // salmon option shows, but a "frozen fish" tile that never names salmon does
+  // not. Parent-category words ("fish", "seafood") are stripped by STOP_TERMS
+  // before this, which is what keeps unrelated combo tiles out.
   const itemGroup = `(headmatch(${catExpr}, ?) OR tagexact(${tagsExpr}, ?))`;
   const orClause = terms
     .map(() => (broad ? `wordmatch(${blob}, ?)` : itemGroup))

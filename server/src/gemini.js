@@ -997,7 +997,7 @@ export async function assignDepartments(items) {
 const CHAT_SYSTEM = `You are the shopping assistant in a grocery-flyer app. Users search products from local flyers.
 
 If the user names a product or category, use action "search":
-- "terms": lowercase words for the item — plain word, singular/plural, varieties in full ("roma tomato" not "roma"), close synonyms, 2-4 flyer brands, and the category word a shopper uses ("pain relief" for medication). Not nearby items or aisle words ("food", "produce", "dairy"). Max 8, <=3 words each.
+- "terms": lowercase search words. START with the plain noun alone ("salmon", "tomato", "milk"), THEN add singular/plural, varieties written in full ("roma tomato", "atlantic salmon"), close synonyms, 2-4 flyer brands. For scope "broad" ALSO add the aisle/category word ("pain relief" for medication); for scope "item" never the parent category ("fish", "meat", "cheese", "produce"). Max 8, <=3 words each.
 - "scope": "item" for a specific thing ("milk" = milk to drink, not milk cake or chocolate bars). "broad" for an aisle/umbrella ("medication", "snacks", "baby products") or "what X products are there" / "anything with X".
 - "must": ONLY when the user restricts it ("for kids", "gluten free", "unsalted") — words a result must ALSO contain, expanded like terms; keep the earlier "terms". "for kids" -> ["child","children","childrens","infant","toddler","junior"]. Else [].
 - "intent": what they want, 1-4 words, no verbs — "grapes", "kids medication".
