@@ -1,6 +1,7 @@
 import React, {useCallback, useEffect, useRef, useState} from 'react';
 import {
   ActivityIndicator,
+  Alert,
   Dimensions,
   FlatList,
   Image,
@@ -276,7 +277,7 @@ function ChatScreen(): React.JSX.Element {
 
   const stop = () => abortRef.current?.abort();
 
-  const newChat = () => {
+  const resetChat = () => {
     abortRef.current?.abort();
     reqId.current++;
     setMessages([GREETING]);
@@ -288,6 +289,17 @@ function ChatScreen(): React.JSX.Element {
     Keyboard.dismiss();
     requestAnimationFrame(() =>
       listRef.current?.scrollToOffset({offset: 0, animated: false}),
+    );
+  };
+
+  const newChat = () => {
+    Alert.alert(
+      'Start a new chat?',
+      'This clears the current conversation and its results.',
+      [
+        {text: 'Cancel', style: 'cancel'},
+        {text: 'New chat', style: 'destructive', onPress: resetChat},
+      ],
     );
   };
 
