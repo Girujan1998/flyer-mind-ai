@@ -21,6 +21,28 @@ const db = new Database(join(DATA_DIR, 'flyer.db'));
 db.pragma('journal_mode = WAL');
 db.pragma('foreign_keys = ON');
 
+// Whole-word matcher for the chat expansion search: `needle` must appear as a
+// full word or phrase in `haystack` (a trailing plural s/es is tolerated). Keeps
+// a clipped term like "roma" matching "roma tomato" while rejecting "Romaine",
+// "Roman" and the "aromatics" tag; "vine" no longer matches "Vinegar".
+const _wordRe = new Map();
+db.function('wordmatch', {deterministic: true}, (haystack, needle) => {
+  if (!haystack || !needle) {
+    return 0;
+  }
+  const key = String(needle);
+  let re = _wordRe.get(key);
+  if (!re) {
+    const n = key.toLowerCase().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    re = new RegExp(`(?:^|[^a-z0-9])${n}(?:e?s)?(?:$|[^a-z0-9])`);
+    if (_wordRe.size > 400) {
+      _wordRe.clear();
+    }
+    _wordRe.set(key, re);
+  }
+  return re.test(String(haystack).toLowerCase()) ? 1 : 0;
+});
+
 db.exec(`
   CREATE TABLE IF NOT EXISTS flyers (
     id             TEXT PRIMARY KEY,
@@ -511,8 +533,9 @@ const STOP_TERMS = new Set([
 ]);
 
 /**
- * OR-search over up to 10 expansion terms (from the chat agent). Each term
- * matches p.name/info/category/tags LIKE %term%. Ranked by how many distinct
+ * OR-search over up to 10 expansion terms (from the chat agent). Each term must
+ * appear as a WHOLE word/phrase in p.name/info/category/tags (via `wordmatch`,
+ * so "roma" hits "Roma Tomatoes" but not "Romaine"). Ranked by how many distinct
  * terms a product matches, then newest first.
  *
  * `must` is an optional list of restriction words (e.g. child / infant / gluten
@@ -544,14 +567,12 @@ export function searchProductsExpanded(
   const must = norm(mustIn);
 
   const lim = Math.max(1, Math.min(50, Number(limit) || 24));
-  const group =
-    '(p.name LIKE ? OR p.info LIKE ? OR p.category LIKE ? OR p.tags LIKE ?)';
-  // `%term%` x4 (name/info/category/tags) per term, in order.
-  const like = list =>
-    list.flatMap(t => {
-      const l = `%${t}%`;
-      return [l, l, l, l];
-    });
+  // The searchable text for one product; `"` and `,` in the tags JSON act as
+  // word boundaries, which is what we want.
+  const blob =
+    "lower(coalesce(p.name,'') || ' ' || coalesce(p.info,'') || ' ' || " +
+    "coalesce(p.category,'') || ' ' || coalesce(p.tags,''))";
+  const group = `wordmatch(${blob}, ?)`; // one ? per term
 
   const orClause = terms.map(() => group).join(' OR ');
   const scoreExpr = terms
@@ -561,9 +582,6 @@ export function searchProductsExpanded(
     ? ` AND (${must.map(() => group).join(' OR ')})`
     : '';
   const where = `WHERE (${orClause})${mustClause}`;
-
-  const termLike = like(terms);
-  const mustLike = like(must);
 
   const rows = db
     .prepare(
@@ -575,7 +593,7 @@ export function searchProductsExpanded(
         LIMIT ?`,
     )
     // bind order = statement text: SELECT score (terms), WHERE (terms, must), LIMIT
-    .all(...termLike, ...termLike, ...mustLike, lim);
+    .all(...terms, ...terms, ...must, lim);
 
   const total = db
     .prepare(
@@ -583,7 +601,7 @@ export function searchProductsExpanded(
          FROM products p JOIN flyers f ON f.id = p.flyer_id
         ${where}`,
     )
-    .get(...termLike, ...mustLike).n;
+    .get(...terms, ...must).n;
 
   const products = rows.map(r => mapProductRow(r, baseUrl));
   return {products, pages: collectPages(products, baseUrl), terms, must, total};
