@@ -38,7 +38,7 @@ export type Product = {
   onSale: boolean;
   /** URL of a small pre-cropped thumbnail of this product; null if none. */
   thumb: string | null;
-  /** Store this flyer is for, e.g. "Food Basics"; '' if unknown. */
+  /** Retailer this flyer is for (banner name); '' if unknown. */
   store: string;
   /** First day the flyer prices are in effect, "YYYY-MM-DD"; '' if unknown. */
   validFrom: string;
@@ -99,7 +99,7 @@ export type UploadResult = {
   savedProducts: number;
   renderedPages: number;
   totalPages: number;
-  /** Store the flyer is for, e.g. "Food Basics"; '' if the model couldn't tell. */
+  /** Retailer the flyer is for (banner name); '' if the model couldn't tell. */
   store: string;
   /** Price-validity window, "YYYY-MM-DD"; '' if not printed on page 1. */
   validFrom: string;
@@ -127,6 +127,36 @@ export function extractFlyer(
   return api<UploadResult>('/flyers/extract', {
     method: 'POST',
     body: form,
+    signal,
+  });
+}
+
+export type ChatRole = 'user' | 'assistant';
+export type ChatTurn = {role: ChatRole; content: string};
+export type ChatResponse = {
+  reply: string;
+  products: Product[];
+  pages: FlyerPage[];
+  /** The expansion terms the agent actually searched; [] for a plain reply. */
+  terms: string[];
+  /** Restriction words a follow-up added (e.g. child / gluten free); [] if none. */
+  must: string[];
+};
+
+/**
+ * Ask the Chat-tab agent. The server runs one Gemini call to turn the latest
+ * user turn into either a product search (expanded with synonyms / brand names)
+ * or a short reply. `messages` should be a trimmed recent history ending with
+ * the new user turn.
+ */
+export function sendChat(
+  messages: ChatTurn[],
+  signal?: AbortSignal,
+): Promise<ChatResponse> {
+  return api<ChatResponse>('/chat', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({messages}),
     signal,
   });
 }

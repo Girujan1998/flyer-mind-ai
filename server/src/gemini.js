@@ -47,7 +47,7 @@ this tile, leave it empty / 0 rather than guessing.
 For each product:
 - "page": the page number (from the "=== PAGE N ===" label) the product appears on.
 - "name": the product name exactly as printed (brand + product line, e.g.
-  "Great Value bacon", "Silk Almond, Cashew or Protein soy beverage"). Copy the
+  "Store-brand bacon", "Almond, Cashew or Protein soy beverage"). Copy the
   printed text; do not summarise or turn it into a category.
 - "priceValue": the price as a NUMBER in dollars. Look carefully at each digit
   (a bold "3" and "7" are easy to confuse in flyer fonts). Flyers print the
@@ -67,7 +67,7 @@ For each product:
   price next to the current one, put that OLD price here as text ("$5.99").
   Empty string when there is no crossed-out price — most flyer tiles have none.
 - "promoText": the tile's explicit deal callout, copied short and verbatim —
-  "Save $2", "Save 30%", "2 for $5", "Buy 1 Get 1", "Rollback", "Clearance",
+  "Save $2", "Save 30%", "2 for $5", "Buy 1 Get 1", "Price drop", "Clearance",
   "Members price", "Spend $25 get 2000 points". Empty string if the tile just
   shows a plain price with no discount wording.
 - "box": this product tile's bounding box [ymin, xmin, ymax, xmax], each 0-1000,
@@ -118,9 +118,9 @@ function metaPrompt(year) {
   return `This is page 1 of a retail store flyer / weekly circular. Read only what is
 printed on this page and return ONE JSON object (not an array):
 
-- "store": the retailer name from the largest logo or masthead — the banner only
-  ("Walmart", "Food Basics", "No Frills", "Loblaws", "Costco"). No slogan, no
-  street address, no "Supercentre"/"Weekly Flyer" suffix. "" if no name is visible.
+- "store": the retailer name from the largest logo or masthead — the banner name
+  only. No slogan, no street address, no format/"Weekly Flyer" suffix. "" if no
+  name is visible.
 - "validFrom": the FIRST day the flyer's prices are in effect, as "YYYY-MM-DD".
   Flyers print this as "Prices in effect Thursday, August 28", "Valid Aug 28 –
   Sep 3", "Sale dates 08/28–09/03", "Semaine du 28 août". Take the START of the
@@ -986,4 +986,178 @@ export async function assignDepartments(items) {
   }
 
   return {result, usage: readUsage(json), finishReason};
+}
+
+// ---------------------------------------------------------------------------
+// Chat agent — turns a shopper's message into either search terms or a reply.
+// One Gemini call per turn, no tool round-trip: the model returns a single
+// structured object and the server acts on it directly.
+// ---------------------------------------------------------------------------
+
+const CHAT_SYSTEM = `You are the shopping assistant in a grocery-flyer app. Users search products from local flyers.
+
+If the user names a product or category, use action "search":
+- "terms": lowercase search words. START with the plain noun alone ("salmon", "tomato", "milk"), THEN add singular/plural, varieties written in full ("roma tomato", "atlantic salmon"), close synonyms, 2-4 flyer brands. For scope "broad" ALSO add the aisle/category word ("pain relief" for medication); for scope "item" never the parent category ("fish", "meat", "cheese", "produce"). Max 8, <=3 words each.
+- "scope": "item" for a specific thing ("milk" = milk to drink, not milk cake or chocolate bars). "broad" for an aisle/umbrella ("medication", "snacks", "baby products") or "what X products are there" / "anything with X".
+- "must": ONLY when the user restricts it ("for kids", "gluten free", "unsalted") — words a result must ALSO contain, expanded like terms; keep the earlier "terms". "for kids" -> ["child","children","childrens","infant","toddler","junior"]. Else [].
+- "intent": what they want, 1-4 words, no verbs — "grapes", "kids medication".
+
+Otherwise use action "reply" (1-2 sentences). Don't answer general-knowledge questions — say you only help find flyer products.
+
+Fill every field; unused ones "" or [].`;
+
+const CHAT_SCHEMA = {
+  type: 'OBJECT',
+  properties: {
+    action: {type: 'STRING', enum: ['search', 'reply']},
+    terms: {type: 'ARRAY', items: {type: 'STRING'}},
+    scope: {type: 'STRING', enum: ['item', 'broad']},
+    must: {type: 'ARRAY', items: {type: 'STRING'}},
+    intent: {type: 'STRING'},
+    reply: {type: 'STRING'},
+  },
+  required: ['action', 'terms', 'scope', 'must', 'intent', 'reply'],
+};
+
+const GENERIC_REPLY =
+  'I can only help you find products in the flyers. Try "find me some grapes" or "I need toilet paper".';
+
+// Same character rules as cleanCategory: lowercase, drop punctuation, collapse
+// whitespace. Keep 2-40 chars, at most 3 words. Dedupe, cap at 10.
+function cleanTerms(value) {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  const seen = new Set();
+  const out = [];
+  for (const raw of value) {
+    const t = (raw ?? '')
+      .toString()
+      .toLowerCase()
+      .replace(/[^a-z0-9\s&/-]/g, '')
+      .replace(/\s+/g, ' ')
+      .trim();
+    if (!t || t.length < 2 || t.length > 40 || t.split(' ').length > 3) {
+      continue;
+    }
+    if (seen.has(t)) {
+      continue;
+    }
+    seen.add(t);
+    out.push(t);
+    if (out.length >= 10) {
+      break;
+    }
+  }
+  return out;
+}
+
+/**
+ * @param {Array<{ role: 'user'|'assistant', content: string }>} messages
+ *   Trimmed recent history, ending with the new user turn.
+ * @returns {Promise<
+ *   | { kind: 'search', terms: string[], scope: 'item'|'broad', must: string[], intent: string, usage: object }
+ *   | { kind: 'reply', text: string, usage: object }
+ * >}
+ */
+export async function chatAgent(messages) {
+  const lastUser = messages[messages.length - 1]?.content ?? '';
+
+  if (process.env.GEMINI_API_KEY === 'MOCK') {
+    return {
+      kind: 'search',
+      terms: cleanTerms(
+        lastUser
+          .toLowerCase()
+          .split(/\s+/)
+          .filter(w => w.length > 2),
+      ),
+      scope: 'item',
+      must: [],
+      intent: lastUser.slice(0, 40),
+      usage: {mock: true},
+    };
+  }
+
+  const {apiKey, model} = config();
+
+  const contents = messages.map(m => ({
+    role: m.role === 'assistant' ? 'model' : 'user',
+    parts: [{text: m.content}],
+  }));
+
+  const json = await callGemini(
+    {
+      systemInstruction: {parts: [{text: CHAT_SYSTEM}]},
+      contents,
+      generationConfig: {
+        temperature: 0,
+        responseMimeType: 'application/json',
+        responseSchema: CHAT_SCHEMA,
+        thinkingConfig: {thinkingBudget: 0},
+        maxOutputTokens: 256,
+      },
+    },
+    apiKey,
+    model,
+  );
+
+  const cand = json.candidates?.[0];
+  const text = cand?.content?.parts?.[0]?.text ?? '';
+  const usage = readUsage(json);
+
+  let parsed = {};
+  try {
+    parsed = JSON.parse(text) || {};
+  } catch {
+    // truncated / non-JSON — fall through to the generic reply
+  }
+
+  const terms = cleanTerms(parsed.terms);
+  const must = cleanTerms(parsed.must);
+  const scope = parsed.scope === 'broad' ? 'broad' : 'item';
+  const result =
+    parsed.action === 'search' && terms.length
+      ? {
+          kind: 'search',
+          terms,
+          scope,
+          must,
+          intent: String(parsed.intent || '').slice(0, 60),
+          usage,
+        }
+      : {
+          kind: 'reply',
+          text: (String(parsed.reply || '').trim() || GENERIC_REPLY).slice(
+            0,
+            400,
+          ),
+          usage,
+        };
+
+  console.log(
+    `[gemini] chat ${result.kind}  turns=${messages.length}  prompt=${n(
+      usage.promptTokens,
+    )} output=${n(usage.outputTokens)} thoughts=${n(
+      usage.thoughtsTokens,
+    )} total=${n(usage.totalTokens)}` +
+      (result.kind === 'search'
+        ? `  ${result.scope}  [${result.terms.join(', ')}]` +
+          (result.must.length ? `  must:[${result.must.join(', ')}]` : '')
+        : ''),
+  );
+
+  await appendUsageLog({
+    at: new Date().toISOString(),
+    op: 'chat',
+    model,
+    turns: messages.length,
+    kind: result.kind,
+    scope: result.kind === 'search' ? result.scope : undefined,
+    terms: result.kind === 'search' ? result.terms : [],
+    must: result.kind === 'search' ? result.must : [],
+    ...usage,
+  });
+
+  return result;
 }

@@ -17,9 +17,10 @@ import {
   productCountForFlyer,
   saveExtraction,
   searchProducts,
+  searchProductsExpanded,
   totalProducts,
 } from './db.js';
-import {extractFlyer, extractFlyerMeta} from './gemini.js';
+import {chatAgent, extractFlyer, extractFlyerMeta} from './gemini.js';
 import {renderPdf} from './pdf.js';
 import {renderThumbs} from './thumbs.js';
 
@@ -307,6 +308,60 @@ app.get('/filters', (req, res) => {
   } catch (err) {
     console.error('[filters] failed:', err);
     res.status(500).json({error: err?.message || 'Query failed'});
+  }
+});
+
+/**
+ * POST /chat  { messages: [{ role: 'user'|'assistant', content }] }
+ *   -> { reply, products: [...], pages: [...], terms: [...] }
+ *
+ * The Chat-tab agent. One Gemini call turns the latest user turn into either
+ * search terms (-> expanded product lookup, templated reply) or a short reply.
+ */
+app.post('/chat', express.json({limit: '32kb'}), async (req, res) => {
+  try {
+    const messages = (Array.isArray(req.body?.messages) ? req.body.messages : [])
+      .filter(
+        m =>
+          (m?.role === 'user' || m?.role === 'assistant') &&
+          typeof m?.content === 'string',
+      )
+      .slice(-8)
+      .map(m => ({role: m.role, content: m.content.slice(0, 2000)}));
+
+    if (!messages.length || messages[messages.length - 1].role !== 'user') {
+      return res.status(400).json({error: 'messages must end with a user turn'});
+    }
+
+    const agent = await chatAgent(messages);
+
+    if (agent.kind === 'search') {
+      const {products, pages, terms, must, total} = searchProductsExpanded(
+        agent.terms,
+        baseUrlOf(req),
+        {limit: 24, must: agent.must, broad: agent.scope === 'broad'},
+      );
+      const intent = agent.intent || terms[0] || 'that';
+      const reply = products.length
+        ? `Found ${total} match${total === 1 ? '' : 'es'} for "${intent}"` +
+          (total > products.length ? ` (showing ${products.length}).` : '.')
+        : `I couldn't find anything for "${intent}" in the flyers right now. ` +
+          `I searched: ${terms.join(', ')}` +
+          (must.length ? `, filtered to: ${must.join(', ')}` : '') +
+          '.';
+      return res.json({reply, products, pages, terms, must});
+    }
+
+    return res.json({
+      reply: agent.text,
+      products: [],
+      pages: [],
+      terms: [],
+      must: [],
+    });
+  } catch (err) {
+    console.error('[chat] failed:', err);
+    res.status(500).json({error: err?.message || 'Chat failed'});
   }
 });
 

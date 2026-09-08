@@ -20,6 +20,13 @@ jest.mock('./src/api/extract', () => {
       total: 0,
     }),
     extractFlyer: jest.fn().mockResolvedValue({}),
+    sendChat: jest.fn().mockResolvedValue({
+      reply: '',
+      products: [],
+      pages: [],
+      terms: [],
+      must: [],
+    }),
   };
 });
 

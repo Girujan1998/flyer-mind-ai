@@ -49,7 +49,7 @@ Sep 2"). It is stored on the `flyers` row (`store`, `valid_from`, `valid_to`,
   request** — it runs in parallel with the product extraction, so no extra
   wall-clock time.
 - When a flyer prints the year, both dates land exactly. When the year is
-  **not** printed (common on Walmart circulars) the model assumes the current
+  **not** printed (common on some circulars) the model assumes the current
   year — the month/day are right, the year may be off. `""` for both dates if
   no range is printed on page 1.
 - `node scripts/test-flyer-meta.mjs <file.pdf> ...` runs just this call (no DB,
@@ -80,7 +80,7 @@ Each product also carries, from the same vision call:
   (`"$5.99"`), else `""`. A "was" price that isn't actually higher than the
   current price is dropped (common misread).
 - **`promoText`** — a verbatim deal callout (`"Save $2"`, `"2 for $5"`,
-  `"Rollback"`), else `""`.
+  `"Clearance"`), else `""`.
 - **`onSale`** — `true` when `wasPrice` **or** `promoText` is set. Strict: a
   plain flyer price with no discount wording is **not** "on sale".
 
@@ -121,7 +121,7 @@ Extracts, **saves to the DB**, and returns a summary only:
 {
   "flyerId": "…", "name": "flyer.pdf",
   "savedProducts": 16, "renderedPages": 1, "totalPages": 1,
-  "store": "Food Basics", "validFrom": "2026-08-27", "validTo": "2026-09-02",
+  "store": "Some Grocer", "validFrom": "2026-08-27", "validTo": "2026-09-02",
   "failedPages": [], "reused": false
 }
 ```
@@ -133,7 +133,7 @@ match the product's **name, info, category, or tags**. `department`, `store` and
 `status` are comma-separated multi-selects that further narrow the set:
 
 - `department=laundry,frozen` — one of the fixed aisles (`src/departments.js`)
-- `store=Walmart,Food Basics` — exact store name
+- `store=Some Grocer,Another Market` — exact store name
 - `status=valid,expired` — `valid` \| `upcoming` \| `expired` \| `unknown`,
   computed from the flyer dates vs. the server's clock
 - `sale=1` — only products with a `wasPrice` or `promoText`
@@ -146,7 +146,7 @@ match the product's **name, info, category, or tags**. `department`, `store` and
       "category": "corn", "tags": ["vegetable","produce","cob"],
       "department": "vegetables",
       "wasPrice": "48¢", "promoText": "Save 14¢", "onSale": true,
-      "store": "Food Basics", "validFrom": "2026-08-27", "validTo": "2026-09-02",
+      "store": "Some Grocer", "validFrom": "2026-08-27", "validTo": "2026-09-02",
       "thumb": "http://<host>/thumbs/<flyerId>/<id>.jpg" }
   ],
   "pages": [
@@ -169,7 +169,7 @@ Options for the app's filter modal, each list `[{ value, count }]`, plus the
 ```jsonc
 {
   "departments": [{ "value": "pantry", "count": 47 }, …],
-  "stores":      [{ "value": "Food Basics", "count": 294 }],
+  "stores":      [{ "value": "Some Grocer", "count": 294 }],
   "statuses":    [{ "value": "valid", "count": 294 }, { "value": "expired", "count": 432 }],
   "saleCount": 61,
   "total": 294

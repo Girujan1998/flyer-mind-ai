@@ -9,7 +9,10 @@ import {fileURLToPath} from 'node:url';
 
 import Database from 'better-sqlite3';
 
-import {isDepartment} from './departments.js';
+import {isDepartment, matchDepartments} from './departments.js';
+
+/** Classification of the Search-box text, memoised by the normalised query. */
+const _classCache = new Map();
 
 const DATA_DIR = join(dirname(fileURLToPath(import.meta.url)), '..', 'data');
 export const PAGES_DIR = join(DATA_DIR, 'pages');
@@ -20,6 +23,66 @@ mkdirSync(THUMBS_DIR, {recursive: true});
 const db = new Database(join(DATA_DIR, 'flyer.db'));
 db.pragma('journal_mode = WAL');
 db.pragma('foreign_keys = ON');
+
+// Whole-word matcher for the chat expansion search: `needle` must appear as a
+// full word or phrase in `haystack` (a trailing plural s/es is tolerated). Keeps
+// a clipped term like "roma" matching "roma tomato" while rejecting "Romaine",
+// "Roman" and the "aromatics" tag; "vine" no longer matches "Vinegar".
+const _wordRe = new Map();
+db.function('wordmatch', {deterministic: true}, (haystack, needle) => {
+  if (!haystack || !needle) {
+    return 0;
+  }
+  const key = String(needle);
+  let re = _wordRe.get(key);
+  if (!re) {
+    const n = key.toLowerCase().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    re = new RegExp(`(?:^|[^a-z0-9])${n}(?:e?s)?(?:$|[^a-z0-9])`);
+    if (_wordRe.size > 400) {
+      _wordRe.clear();
+    }
+    _wordRe.set(key, re);
+  }
+  return re.test(String(haystack).toLowerCase()) ? 1 : 0;
+});
+
+// Like `wordmatch` but `needle` must be the HEAD (last word/phrase) of `haystack`.
+// A chat search for "milk" then means a product whose category IS milk
+// ("chocolate milk", "plant-based milk") — not "milk cake" or "ice cream".
+const _headRe = new Map();
+db.function('headmatch', {deterministic: true}, (haystack, needle) => {
+  if (!haystack || !needle) {
+    return 0;
+  }
+  const key = String(needle);
+  let re = _headRe.get(key);
+  if (!re) {
+    const n = key.toLowerCase().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    re = new RegExp(`(?:^|[^a-z0-9])${n}(?:e?s)?\\s*$`);
+    if (_headRe.size > 400) {
+      _headRe.clear();
+    }
+    _headRe.set(key, re);
+  }
+  return re.test(String(haystack).toLowerCase()) ? 1 : 0;
+});
+
+// True when `needle` is a COMPLETE quoted entry in the `tags` JSON string
+// (plural-tolerant). Lets item-scope search fall back to tags when the category
+// is a generic aisle word ("vegetables" -> tag "onions"), while NOT matching a
+// multi-word tag like "ice milk" for the needle "milk".
+db.function('tagexact', {deterministic: true}, (tags, needle) => {
+  if (!tags || !needle) {
+    return 0;
+  }
+  const h = String(tags).toLowerCase();
+  const n = String(needle).toLowerCase();
+  return h.includes(`"${n}"`) ||
+    h.includes(`"${n}s"`) ||
+    h.includes(`"${n}es"`)
+    ? 1
+    : 0;
+});
 
 db.exec(`
   CREATE TABLE IF NOT EXISTS flyers (
@@ -219,6 +282,7 @@ export const saveExtraction = db.transaction(
       i++;
     }
 
+    _classCache.clear(); // new categories/tags may change how a query classifies
     return {flyerId, savedProducts: products.length};
   },
 );
@@ -237,6 +301,7 @@ export const applyCategories = db.transaction(rows => {
       tags: r.tags && r.tags.length ? JSON.stringify(r.tags) : null,
     });
   }
+  _classCache.clear();
 });
 
 /** Distinct categories whose products still have no department. */
@@ -342,22 +407,96 @@ const toList = v =>
 
 const truthy = v => v === true || v === 1 || v === '1' || v === 'true';
 
-// { clause, params } for the shared WHERE. Both callers JOIN flyers as `f`.
+const CAT_EXPR = "lower(coalesce(p.category,''))";
+const TAGS_EXPR = "coalesce(p.tags,'')";
+
+/**
+ * Decide how a Search-tab query should match:
+ * - `department` — an aisle word ("clothing", "appliances", "cleaning supplies")
+ *   → filter by department; leftover words become rank-only `scoreTerms`.
+ * - `item` — the whole query names something we stock (its head is a category
+ *   head or an exact tag) → precise `headmatch`/`tagexact` match.
+ * - `like` — anything else (brands, typos, "greek yogurt") → today's `LIKE %w%`.
+ * Returns `{ mode, conds, params, scoreTerms }` (conds/params are the query
+ * portion of the WHERE only).
+ */
+function classifyQuery(q) {
+  const raw = String(q || '')
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, ' ');
+  if (!raw) {
+    return {mode: 'empty', conds: [], params: [], scoreTerms: []};
+  }
+  const cached = _classCache.get(raw);
+  if (cached) {
+    return cached;
+  }
+  const tokens = raw.split(' ').filter(Boolean).slice(0, 6);
+
+  let out;
+  const dep = matchDepartments(raw);
+  if (dep) {
+    out = {
+      mode: 'department',
+      conds: [`p.department IN (${dep.deptIds.map(() => '?').join(',')})`],
+      params: [...dep.deptIds],
+      scoreTerms: tokens.filter(t => !dep.consumed.has(t)),
+    };
+  } else if (
+    db
+      .prepare(`SELECT 1 FROM products p WHERE headmatch(${CAT_EXPR}, ?) LIMIT 1`)
+      .get(raw)
+  ) {
+    // Something's category IS this ("salmon", "tomatoes") — show only those, not
+    // products that merely mention it (a "seafood" tile tagged "salmon").
+    out = {
+      mode: 'item',
+      conds: [`headmatch(${CAT_EXPR}, ?)`],
+      params: [raw],
+      scoreTerms: [raw],
+    };
+  } else if (
+    db
+      .prepare(`SELECT 1 FROM products p WHERE tagexact(${TAGS_EXPR}, ?) LIMIT 1`)
+      .get(raw)
+  ) {
+    // No product's category is this, but it's an exact tag — e.g. "onion" on a
+    // combo tile the categoriser filed under "vegetables".
+    out = {
+      mode: 'item',
+      conds: [`(headmatch(${CAT_EXPR}, ?) OR tagexact(${TAGS_EXPR}, ?))`],
+      params: [raw, raw],
+      scoreTerms: [raw],
+    };
+  } else {
+    const conds = [];
+    const params = [];
+    for (const w of tokens) {
+      conds.push(
+        '(p.name LIKE ? OR p.info LIKE ? OR p.category LIKE ? OR p.tags LIKE ?)',
+      );
+      const like = `%${w}%`;
+      params.push(like, like, like, like);
+    }
+    out = {mode: 'like', conds, params, scoreTerms: tokens};
+  }
+
+  if (_classCache.size > 2000) {
+    _classCache.clear();
+  }
+  _classCache.set(raw, out);
+  return out;
+}
+
+// { clause, params, query } for the shared WHERE. Both callers JOIN flyers as `f`.
 function buildWhere({q, departments, stores, statuses, onSale}, today) {
   const conds = [];
   const params = [];
 
-  for (const w of String(q || '')
-    .trim()
-    .split(/\s+/)
-    .filter(Boolean)
-    .slice(0, 6)) {
-    conds.push(
-      '(p.name LIKE ? OR p.info LIKE ? OR p.category LIKE ? OR p.tags LIKE ?)',
-    );
-    const like = `%${w}%`;
-    params.push(like, like, like, like);
-  }
+  const qw = classifyQuery(q);
+  conds.push(...qw.conds);
+  params.push(...qw.params);
 
   const deps = toList(departments)
     .map(s => s.toLowerCase())
@@ -383,60 +522,23 @@ function buildWhere({q, departments, stores, statuses, onSale}, today) {
     conds.push('p.on_sale = 1');
   }
 
-  return {clause: conds.length ? `WHERE ${conds.join(' AND ')}` : '', params};
+  return {
+    clause: conds.length ? `WHERE ${conds.join(' AND ')}` : '',
+    params,
+    query: qw,
+  };
 }
 
-/**
- * Paginated search over all stored products, newest first.
- * `q` matches name/info/category/tags; `departments` / `stores` / `statuses`
- * are optional arrays (or comma strings) that further narrow the set.
- * `baseUrl` is `http://<host>` — used to build page + thumbnail URLs.
- * Returns { products, pages, total, hasMore }.
- */
-export function searchProducts(
-  {q = '', departments, stores, statuses, onSale, limit = 20, offset = 0},
-  baseUrl,
-) {
-  const lim = Math.max(1, Math.min(100, Number(limit) || 20));
-  const off = Math.max(0, Number(offset) || 0);
-  const today = todayIso();
+// The product columns every search selects. `searchProductsExpanded` appends a
+// `match_score` column; `mapProductRow` ignores anything it doesn't name.
+const PRODUCT_COLS = `p.id, p.flyer_id, p.page, p.name, p.price, p.price_value, p.info,
+       p.box, p.confidence, p.category, p.tags, p.department,
+       p.was_price, p.promo_text, p.on_sale, p.has_thumb,
+       f.store, f.valid_from, f.valid_to`;
 
-  const {clause, params} = buildWhere(
-    {q, departments, stores, statuses, onSale},
-    today,
-  );
-
-  const total = db
-    .prepare(
-      `SELECT COUNT(*) AS n
-         FROM products p JOIN flyers f ON f.id = p.flyer_id
-         ${clause}`,
-    )
-    .get(...params).n;
-
-  // Plain browse (no query, no filters): rank by flyer status so expired
-  // flyers sink to the bottom. Any narrowing keeps the plain newest-first order.
-  const plain = clause === '';
-  const orderBy = plain
-    ? `ORDER BY ${STATUS_RANK}, p.created_at DESC, p.rowid DESC`
-    : 'ORDER BY p.created_at DESC, p.rowid DESC';
-  const orderParams = plain ? [today, today] : [];
-
-  const rows = db
-    .prepare(
-      `SELECT p.id, p.flyer_id, p.page, p.name, p.price, p.price_value, p.info,
-              p.box, p.confidence, p.category, p.tags, p.department,
-              p.was_price, p.promo_text, p.on_sale, p.has_thumb,
-              f.store, f.valid_from, f.valid_to
-         FROM products p
-         JOIN flyers f ON f.id = p.flyer_id
-         ${clause}
-        ${orderBy}
-        LIMIT ? OFFSET ?`,
-    )
-    .all(...params, ...orderParams, lim, off);
-
-  const products = rows.map(r => ({
+/** One DB row -> the API product shape. */
+function mapProductRow(r, baseUrl) {
+  return {
     id: r.id,
     flyerId: r.flyer_id,
     page: r.page,
@@ -455,12 +557,12 @@ export function searchProducts(
     store: r.store || '',
     validFrom: r.valid_from || '',
     validTo: r.valid_to || '',
-    thumb: r.has_thumb
-      ? `${baseUrl}/thumbs/${r.flyer_id}/${r.id}.jpg`
-      : null,
-  }));
+    thumb: r.has_thumb ? `${baseUrl}/thumbs/${r.flyer_id}/${r.id}.jpg` : null,
+  };
+}
 
-  // The distinct pages this result set references, with their pixel size + URL.
+/** The distinct flyer pages a product list references, with pixel size + URL. */
+function collectPages(products, baseUrl) {
   const seen = new Set();
   const pages = [];
   for (const p of products) {
@@ -480,8 +582,219 @@ export function searchProducts(
       });
     }
   }
+  return pages;
+}
+
+/**
+ * Paginated search over all stored products, newest first.
+ * `q` matches name/info/category/tags; `departments` / `stores` / `statuses`
+ * are optional arrays (or comma strings) that further narrow the set.
+ * `baseUrl` is `http://<host>` — used to build page + thumbnail URLs.
+ * Returns { products, pages, total, hasMore }.
+ */
+export function searchProducts(
+  {q = '', departments, stores, statuses, onSale, limit = 20, offset = 0},
+  baseUrl,
+) {
+  const lim = Math.max(1, Math.min(100, Number(limit) || 20));
+  const off = Math.max(0, Number(offset) || 0);
+  const today = todayIso();
+
+  const {clause, params, query} = buildWhere(
+    {q, departments, stores, statuses, onSale},
+    today,
+  );
+
+  const total = db
+    .prepare(
+      `SELECT COUNT(*) AS n
+         FROM products p JOIN flyers f ON f.id = p.flyer_id
+         ${clause}`,
+    )
+    .get(...params).n;
+
+  // Relevance: +3 when the category IS the term, +3 when the term is the
+  // category head, +2 for an exact tag, +1 for a whole-word name hit — so a
+  // "salmon" search surfaces the salmon fillet above the combo tiles it's merely
+  // tagged in, and "yogurt" puts plain yogurt above frozen-yogurt novelties.
+  const terms = query.scoreTerms;
+  const scored = terms.length > 0;
+  const scoreExpr = terms
+    .map(
+      () =>
+        `(CASE WHEN ${CAT_EXPR} = ? THEN 3 ELSE 0 END) + ` +
+        `3 * headmatch(${CAT_EXPR}, ?) + 2 * tagexact(${TAGS_EXPR}, ?) + ` +
+        "(CASE WHEN wordmatch(lower(coalesce(p.name,'') || ' ' || " +
+        "coalesce(p.info,'')), ?) THEN 1 ELSE 0 END)",
+    )
+    .join(' + ');
+  const scoreBinds = terms.flatMap(t => [t, t, t, t]);
+
+  // Plain browse and a bare aisle browse rank by flyer status (expired sinks);
+  // a scored query ranks by relevance; anything else stays newest-first.
+  const plain = clause === '';
+  let orderBy;
+  let orderParams;
+  if (scored) {
+    orderBy = 'ORDER BY score DESC, p.created_at DESC, p.rowid DESC';
+    orderParams = [];
+  } else if (plain || query.mode === 'department') {
+    orderBy = `ORDER BY ${STATUS_RANK}, p.created_at DESC, p.rowid DESC`;
+    orderParams = [today, today];
+  } else {
+    orderBy = 'ORDER BY p.created_at DESC, p.rowid DESC';
+    orderParams = [];
+  }
+
+  const rows = db
+    .prepare(
+      `SELECT ${PRODUCT_COLS}${scored ? `, (${scoreExpr}) AS score` : ''}
+         FROM products p
+         JOIN flyers f ON f.id = p.flyer_id
+         ${clause}
+        ${orderBy}
+        LIMIT ? OFFSET ?`,
+    )
+    // bind order = statement text: SELECT score, WHERE, ORDER (status), LIMIT/OFFSET
+    .all(...scoreBinds, ...params, ...orderParams, lim, off);
+
+  const products = rows.map(r => mapProductRow(r, baseUrl));
+  const pages = collectPages(products, baseUrl);
 
   return {products, pages, total, hasMore: off + rows.length < total};
+}
+
+/** Broad words that would blow a query wide open — dropped before searching. */
+const STOP_TERMS = new Set([
+  'food',
+  'grocery',
+  'groceries',
+  'item',
+  'items',
+  'product',
+  'products',
+  'sale',
+  'deal',
+  'deals',
+  'cheap',
+  // aisle / department words — too broad as an expansion term, and they match
+  // every product carrying that tag.
+  'produce',
+  'dairy',
+  'beverage',
+  'beverages',
+  'pantry',
+  'frozen',
+  'bakery',
+  'deli',
+  'meat',
+  'poultry',
+  'seafood',
+  'fish',
+  'snacks',
+  'household',
+  'cleaning',
+  'aisle',
+]);
+
+/**
+ * OR-search over up to 10 expansion terms (from the chat agent).
+ *
+ * - `broad: false` (default) — the query is a specific item ("milk"): a term
+ *   includes a product only when it is the HEAD of `p.category` OR a complete
+ *   `p.tags` entry, so "Cadbury Dairy Milk" / "Milk Cake" / "ice milk" drop out
+ *   but "Yellow Onions" (category "vegetables", tag "onions") stays.
+ * - `broad: true` — an umbrella query ("medication", "what milk products…"): a
+ *   term matches as a whole word anywhere in name/info/category/tags.
+ *
+ * Ranking (`match_score`) always counts whole-word hits across the full text, so
+ * a brand-name hit in the product name still floats a match to the top.
+ *
+ * `must` is an optional list of restriction words: when given, every result must
+ * ALSO contain at least one of them (whole word, full text) — this is what lets
+ * "medication for kids" narrow rather than re-rank.
+ *
+ * Returns { products, pages, terms, must, total }.
+ */
+export function searchProductsExpanded(
+  termsIn,
+  baseUrl,
+  {limit = 24, must: mustIn = [], broad = false} = {},
+) {
+  const norm = list =>
+    [
+      ...new Set(
+        (Array.isArray(list) ? list : [])
+          .map(t => String(t).trim().toLowerCase())
+          .filter(t => t && !STOP_TERMS.has(t)),
+      ),
+    ].slice(0, 10);
+
+  const terms = norm(termsIn);
+  if (!terms.length) {
+    return {products: [], pages: [], terms: [], must: [], total: 0};
+  }
+  const must = norm(mustIn);
+
+  const lim = Math.max(1, Math.min(50, Number(limit) || 24));
+  // Full searchable text for one product; `"` and `,` in the tags JSON act as
+  // word boundaries, which is what we want.
+  const blob =
+    "lower(coalesce(p.name,'') || ' ' || coalesce(p.info,'') || ' ' || " +
+    "coalesce(p.category,'') || ' ' || coalesce(p.tags,''))";
+  const catExpr = "lower(coalesce(p.category,''))";
+  const tagsExpr = "coalesce(p.tags,'')";
+
+  // Ranking: +1 for a whole-word hit anywhere, +3 when the product's category IS
+  // the term (so "Lactantia Purfiltre Milk" [milk] outranks "Coconut Milk").
+  const scoreExpr = terms
+    .map(
+      () =>
+        `(CASE WHEN wordmatch(${blob}, ?) THEN 1 ELSE 0 END) + ` +
+        `(CASE WHEN ${catExpr} = ? THEN 3 ELSE 0 END)`,
+    )
+    .join(' + ');
+  const scoreBinds = terms.flatMap(t => [t, t]);
+
+  // Inclusion: broad = whole word anywhere. item = the term is the product's
+  // category head ("salmon" for category "salmon") OR a complete tag entry
+  // ("salmon" tag on a "trout or salmon portions" combo tile) — so every real
+  // salmon option shows, but a "frozen fish" tile that never names salmon does
+  // not. Parent-category words ("fish", "seafood") are stripped by STOP_TERMS
+  // before this, which is what keeps unrelated combo tiles out.
+  const itemGroup = `(headmatch(${catExpr}, ?) OR tagexact(${tagsExpr}, ?))`;
+  const orClause = terms
+    .map(() => (broad ? `wordmatch(${blob}, ?)` : itemGroup))
+    .join(' OR ');
+  const inclBinds = broad ? terms : terms.flatMap(t => [t, t]);
+
+  const mustClause = must.length
+    ? ` AND (${must.map(() => `wordmatch(${blob}, ?)`).join(' OR ')})`
+    : '';
+  const where = `WHERE (${orClause})${mustClause}`;
+
+  const rows = db
+    .prepare(
+      `SELECT ${PRODUCT_COLS}, (${scoreExpr}) AS match_score
+         FROM products p
+         JOIN flyers f ON f.id = p.flyer_id
+        ${where}
+        ORDER BY match_score DESC, p.created_at DESC, p.rowid DESC
+        LIMIT ?`,
+    )
+    // bind order = statement text: SELECT score, WHERE (incl, must), LIMIT
+    .all(...scoreBinds, ...inclBinds, ...must, lim);
+
+  const total = db
+    .prepare(
+      `SELECT COUNT(*) AS n
+         FROM products p JOIN flyers f ON f.id = p.flyer_id
+        ${where}`,
+    )
+    .get(...inclBinds, ...must).n;
+
+  const products = rows.map(r => mapProductRow(r, baseUrl));
+  return {products, pages: collectPages(products, baseUrl), terms, must, total};
 }
 
 export function totalProducts() {
