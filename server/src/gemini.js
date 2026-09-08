@@ -994,25 +994,27 @@ export async function assignDepartments(items) {
 // structured object and the server acts on it directly.
 // ---------------------------------------------------------------------------
 
-const CHAT_SYSTEM = `You are the shopping assistant inside a grocery-flyer app. The user browses products extracted from local store flyers.
+const CHAT_SYSTEM = `You are the shopping assistant in a grocery-flyer app. Users search products pulled from local store flyers.
 
-When the user is looking for a product (or a type of product), use action "search":
-- "terms": specific lowercase search terms for THAT item — the plain word, its singular/plural, close synonyms, and 2-4 real brand names likely printed on a flyer for it. Do NOT include broad aisle words like "food", "produce", "grocery", "dairy". Max 8 terms, no duplicates, nothing longer than 3 words.
-- "intent": just the item the user wants, 1-4 words, no verbs — e.g. "grapes", "toilet paper", "green grapes".
+If the user names a product or a product category (even a broad one like "medication" or "snacks"), use action "search":
+- "terms": specific lowercase words for it — plain word, singular/plural, close synonyms, 2-4 flyer brand names. No broad aisle words ("food", "produce", "dairy"). Max 8, no duplicates, <=3 words each.
+- "must": ONLY when the user restricts the search ("for kids", "gluten free", "unsalted", "just Metro") — words a result must ALSO contain, expanded like terms; keep the earlier "terms" and add the restriction here. "for kids" -> ["child","children","childrens","kids","infant","toddler","junior"]. Else [].
+- "intent": what they want, 1-4 words, no verbs — "grapes", "kids medication".
 
-Otherwise use action "reply" with a 1-2 sentence "reply". Do not answer general-knowledge questions unrelated to grocery shopping — say you can only help find products in the flyers.
+Otherwise use action "reply" (1-2 sentences). Don't answer general-knowledge questions — say you only help find flyer products.
 
-Always fill every field: unused ones as "" or [].`;
+Fill every field; unused ones "" or [].`;
 
 const CHAT_SCHEMA = {
   type: 'OBJECT',
   properties: {
     action: {type: 'STRING', enum: ['search', 'reply']},
     terms: {type: 'ARRAY', items: {type: 'STRING'}},
+    must: {type: 'ARRAY', items: {type: 'STRING'}},
     intent: {type: 'STRING'},
     reply: {type: 'STRING'},
   },
-  required: ['action', 'terms', 'intent', 'reply'],
+  required: ['action', 'terms', 'must', 'intent', 'reply'],
 };
 
 const GENERIC_REPLY =
@@ -1052,7 +1054,7 @@ function cleanTerms(value) {
  * @param {Array<{ role: 'user'|'assistant', content: string }>} messages
  *   Trimmed recent history, ending with the new user turn.
  * @returns {Promise<
- *   | { kind: 'search', terms: string[], intent: string, usage: object }
+ *   | { kind: 'search', terms: string[], must: string[], intent: string, usage: object }
  *   | { kind: 'reply', text: string, usage: object }
  * >}
  */
@@ -1068,6 +1070,7 @@ export async function chatAgent(messages) {
           .split(/\s+/)
           .filter(w => w.length > 2),
       ),
+      must: [],
       intent: lastUser.slice(0, 40),
       usage: {mock: true},
     };
@@ -1108,11 +1111,13 @@ export async function chatAgent(messages) {
   }
 
   const terms = cleanTerms(parsed.terms);
+  const must = cleanTerms(parsed.must);
   const result =
     parsed.action === 'search' && terms.length
       ? {
           kind: 'search',
           terms,
+          must,
           intent: String(parsed.intent || '').slice(0, 60),
           usage,
         }
@@ -1131,7 +1136,10 @@ export async function chatAgent(messages) {
     )} output=${n(usage.outputTokens)} thoughts=${n(
       usage.thoughtsTokens,
     )} total=${n(usage.totalTokens)}` +
-      (result.kind === 'search' ? `  [${result.terms.join(', ')}]` : ''),
+      (result.kind === 'search'
+        ? `  [${result.terms.join(', ')}]` +
+          (result.must.length ? `  must:[${result.must.join(', ')}]` : '')
+        : ''),
   );
 
   await appendUsageLog({
@@ -1141,6 +1149,7 @@ export async function chatAgent(messages) {
     turns: messages.length,
     kind: result.kind,
     terms: result.kind === 'search' ? result.terms : [],
+    must: result.kind === 'search' ? result.must : [],
     ...usage,
   });
 

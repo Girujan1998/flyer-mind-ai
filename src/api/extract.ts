@@ -139,6 +139,8 @@ export type ChatResponse = {
   pages: FlyerPage[];
   /** The expansion terms the agent actually searched; [] for a plain reply. */
   terms: string[];
+  /** Restriction words a follow-up added (e.g. child / gluten free); [] if none. */
+  must: string[];
 };
 
 /**

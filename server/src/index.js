@@ -336,22 +336,29 @@ app.post('/chat', express.json({limit: '32kb'}), async (req, res) => {
     const agent = await chatAgent(messages);
 
     if (agent.kind === 'search') {
-      const {products, pages, terms, total} = searchProductsExpanded(
+      const {products, pages, terms, must, total} = searchProductsExpanded(
         agent.terms,
         baseUrlOf(req),
-        {limit: 24},
+        {limit: 24, must: agent.must},
       );
       const intent = agent.intent || terms[0] || 'that';
       const reply = products.length
         ? `Found ${total} match${total === 1 ? '' : 'es'} for "${intent}"` +
           (total > products.length ? ` (showing ${products.length}).` : '.')
-        : `I couldn't find anything for "${intent}" in the flyers right now. I searched: ${terms.join(
-            ', ',
-          )}.`;
-      return res.json({reply, products, pages, terms});
+        : `I couldn't find anything for "${intent}" in the flyers right now. ` +
+          `I searched: ${terms.join(', ')}` +
+          (must.length ? `, filtered to: ${must.join(', ')}` : '') +
+          '.';
+      return res.json({reply, products, pages, terms, must});
     }
 
-    return res.json({reply: agent.text, products: [], pages: [], terms: []});
+    return res.json({
+      reply: agent.text,
+      products: [],
+      pages: [],
+      terms: [],
+      must: [],
+    });
   } catch (err) {
     console.error('[chat] failed:', err);
     res.status(500).json({error: err?.message || 'Chat failed'});

@@ -513,56 +513,80 @@ const STOP_TERMS = new Set([
 /**
  * OR-search over up to 10 expansion terms (from the chat agent). Each term
  * matches p.name/info/category/tags LIKE %term%. Ranked by how many distinct
- * terms a product matches, then newest first. Returns { products, pages, terms,
- * total } — `terms` is the cleaned list actually searched.
+ * terms a product matches, then newest first.
+ *
+ * `must` is an optional list of restriction words (e.g. child / infant / gluten
+ * free): when given, every result must ALSO match at least one of them. This is
+ * what lets a follow-up like "medication for kids" actually narrow the set
+ * rather than just re-rank it.
+ *
+ * Returns { products, pages, terms, must, total } — `terms` / `must` are the
+ * cleaned lists actually used.
  */
-export function searchProductsExpanded(termsIn, baseUrl, {limit = 24} = {}) {
-  const terms = [
-    ...new Set(
-      (Array.isArray(termsIn) ? termsIn : [])
-        .map(t => String(t).trim().toLowerCase())
-        .filter(t => t && !STOP_TERMS.has(t)),
-    ),
-  ].slice(0, 10);
+export function searchProductsExpanded(
+  termsIn,
+  baseUrl,
+  {limit = 24, must: mustIn = []} = {},
+) {
+  const norm = list =>
+    [
+      ...new Set(
+        (Array.isArray(list) ? list : [])
+          .map(t => String(t).trim().toLowerCase())
+          .filter(t => t && !STOP_TERMS.has(t)),
+      ),
+    ].slice(0, 10);
 
+  const terms = norm(termsIn);
   if (!terms.length) {
-    return {products: [], pages: [], terms: [], total: 0};
+    return {products: [], pages: [], terms: [], must: [], total: 0};
   }
+  const must = norm(mustIn);
 
   const lim = Math.max(1, Math.min(50, Number(limit) || 24));
   const group =
     '(p.name LIKE ? OR p.info LIKE ? OR p.category LIKE ? OR p.tags LIKE ?)';
+  // `%term%` x4 (name/info/category/tags) per term, in order.
+  const like = list =>
+    list.flatMap(t => {
+      const l = `%${t}%`;
+      return [l, l, l, l];
+    });
+
   const orClause = terms.map(() => group).join(' OR ');
   const scoreExpr = terms
     .map(() => `(CASE WHEN ${group} THEN 1 ELSE 0 END)`)
     .join(' + ');
-  // `%term%` x4 (name/info/category/tags) per term.
-  const likeParams = terms.flatMap(t => {
-    const like = `%${t}%`;
-    return [like, like, like, like];
-  });
+  const mustClause = must.length
+    ? ` AND (${must.map(() => group).join(' OR ')})`
+    : '';
+  const where = `WHERE (${orClause})${mustClause}`;
+
+  const termLike = like(terms);
+  const mustLike = like(must);
 
   const rows = db
     .prepare(
       `SELECT ${PRODUCT_COLS}, (${scoreExpr}) AS match_score
          FROM products p
          JOIN flyers f ON f.id = p.flyer_id
-        WHERE ${orClause}
+        ${where}
         ORDER BY match_score DESC, p.created_at DESC, p.rowid DESC
         LIMIT ?`,
     )
-    .all(...likeParams, ...likeParams, lim); // score binds, then WHERE binds
+    // bind order = statement text: SELECT score (terms), WHERE (terms, must), LIMIT
+    .all(...termLike, ...termLike, ...mustLike, lim);
 
   const total = db
     .prepare(
       `SELECT COUNT(*) AS n
          FROM products p JOIN flyers f ON f.id = p.flyer_id
-        WHERE ${orClause}`,
+        ${where}`,
     )
-    .get(...likeParams).n;
+    .get(...termLike, ...mustLike).n;
 
   const products = rows.map(r => mapProductRow(r, baseUrl));
-  return {products, pages: collectPages(products, baseUrl), terms, total};
+  return {products, pages: collectPages(products, baseUrl), terms, must, total};
 }
 
 export function totalProducts() {

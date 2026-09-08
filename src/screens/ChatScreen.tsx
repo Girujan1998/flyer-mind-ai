@@ -47,6 +47,7 @@ type ChatMessage = {
   text: string;
   products?: Product[];
   terms?: string[];
+  must?: string[];
   pending?: boolean;
   error?: boolean;
 };
@@ -60,7 +61,11 @@ const GREETING: ChatMessage = {
 let seq = 0;
 const uid = () => `m${Date.now().toString(36)}${(seq++).toString(36)}`;
 
-/** Last 6 turns; product replies collapse to a marker so the model never re-reads card JSON. */
+/**
+ * Last 6 turns. Product replies collapse to a marker so the model never re-reads
+ * card JSON, but the marker keeps the searched terms + any restriction so a
+ * follow-up ("for kids", "the cheap ones") still has the subject in context.
+ */
 function buildHistory(all: ChatMessage[]): ChatTurn[] {
   return all
     .filter(m => !m.pending && !m.error && m.id !== 'greeting')
@@ -70,8 +75,10 @@ function buildHistory(all: ChatMessage[]): ChatTurn[] {
       content:
         m.role === 'assistant' && m.products?.length
           ? `(showed ${m.products.length} products for: ${(m.terms ?? [])
-              .slice(0, 4)
-              .join(', ')})`
+              .slice(0, 8)
+              .join(', ')}${
+              m.must?.length ? `; restricted to: ${m.must.join(', ')}` : ''
+            })`
           : m.text,
     }));
 }
@@ -235,6 +242,7 @@ function ChatScreen(): React.JSX.Element {
                 text: res.reply,
                 products: res.products,
                 terms: res.terms,
+                must: res.must,
               }
             : m,
         ),

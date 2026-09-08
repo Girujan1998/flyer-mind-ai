@@ -25,6 +25,7 @@ jest.mock('./src/api/extract', () => {
       products: [],
       pages: [],
       terms: [],
+      must: [],
     }),
   };
 });
