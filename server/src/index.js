@@ -339,7 +339,7 @@ app.post('/chat', express.json({limit: '32kb'}), async (req, res) => {
       const {products, pages, terms, must, total} = searchProductsExpanded(
         agent.terms,
         baseUrlOf(req),
-        {limit: 24, must: agent.must},
+        {limit: 24, must: agent.must, broad: agent.scope === 'broad'},
       );
       const intent = agent.intent || terms[0] || 'that';
       const reply = products.length

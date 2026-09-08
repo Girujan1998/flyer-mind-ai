@@ -994,11 +994,12 @@ export async function assignDepartments(items) {
 // structured object and the server acts on it directly.
 // ---------------------------------------------------------------------------
 
-const CHAT_SYSTEM = `You are the shopping assistant in a grocery-flyer app. Users search products pulled from local store flyers.
+const CHAT_SYSTEM = `You are the shopping assistant in a grocery-flyer app. Users search products from local flyers.
 
-If the user names a product or a product category (even a broad one like "medication" or "snacks"), use action "search":
-- "terms": lowercase words for the item itself — plain word, singular/plural, its varieties spelled in full ("roma tomato" not "roma"; "green onion" not "green"), close synonyms, 2-4 flyer brands. Not nearby items, not aisle words ("food", "produce", "dairy"). Max 8, <=3 words each.
-- "must": ONLY when the user restricts the search ("for kids", "gluten free", "unsalted", "just Metro") — words a result must ALSO contain, expanded like terms; keep the earlier "terms" and add the restriction here. "for kids" -> ["child","children","childrens","kids","infant","toddler","junior"]. Else [].
+If the user names a product or category, use action "search":
+- "terms": lowercase words for the item — plain word, singular/plural, varieties in full ("roma tomato" not "roma"), close synonyms, 2-4 flyer brands, and the category word a shopper uses ("pain relief" for medication). Not nearby items or aisle words ("food", "produce", "dairy"). Max 8, <=3 words each.
+- "scope": "item" for a specific thing ("milk" = milk to drink, not milk cake or chocolate bars). "broad" for an aisle/umbrella ("medication", "snacks", "baby products") or "what X products are there" / "anything with X".
+- "must": ONLY when the user restricts it ("for kids", "gluten free", "unsalted") — words a result must ALSO contain, expanded like terms; keep the earlier "terms". "for kids" -> ["child","children","childrens","infant","toddler","junior"]. Else [].
 - "intent": what they want, 1-4 words, no verbs — "grapes", "kids medication".
 
 Otherwise use action "reply" (1-2 sentences). Don't answer general-knowledge questions — say you only help find flyer products.
@@ -1010,11 +1011,12 @@ const CHAT_SCHEMA = {
   properties: {
     action: {type: 'STRING', enum: ['search', 'reply']},
     terms: {type: 'ARRAY', items: {type: 'STRING'}},
+    scope: {type: 'STRING', enum: ['item', 'broad']},
     must: {type: 'ARRAY', items: {type: 'STRING'}},
     intent: {type: 'STRING'},
     reply: {type: 'STRING'},
   },
-  required: ['action', 'terms', 'must', 'intent', 'reply'],
+  required: ['action', 'terms', 'scope', 'must', 'intent', 'reply'],
 };
 
 const GENERIC_REPLY =
@@ -1054,7 +1056,7 @@ function cleanTerms(value) {
  * @param {Array<{ role: 'user'|'assistant', content: string }>} messages
  *   Trimmed recent history, ending with the new user turn.
  * @returns {Promise<
- *   | { kind: 'search', terms: string[], must: string[], intent: string, usage: object }
+ *   | { kind: 'search', terms: string[], scope: 'item'|'broad', must: string[], intent: string, usage: object }
  *   | { kind: 'reply', text: string, usage: object }
  * >}
  */
@@ -1070,6 +1072,7 @@ export async function chatAgent(messages) {
           .split(/\s+/)
           .filter(w => w.length > 2),
       ),
+      scope: 'item',
       must: [],
       intent: lastUser.slice(0, 40),
       usage: {mock: true},
@@ -1112,11 +1115,13 @@ export async function chatAgent(messages) {
 
   const terms = cleanTerms(parsed.terms);
   const must = cleanTerms(parsed.must);
+  const scope = parsed.scope === 'broad' ? 'broad' : 'item';
   const result =
     parsed.action === 'search' && terms.length
       ? {
           kind: 'search',
           terms,
+          scope,
           must,
           intent: String(parsed.intent || '').slice(0, 60),
           usage,
@@ -1137,7 +1142,7 @@ export async function chatAgent(messages) {
       usage.thoughtsTokens,
     )} total=${n(usage.totalTokens)}` +
       (result.kind === 'search'
-        ? `  [${result.terms.join(', ')}]` +
+        ? `  ${result.scope}  [${result.terms.join(', ')}]` +
           (result.must.length ? `  must:[${result.must.join(', ')}]` : '')
         : ''),
   );
@@ -1148,6 +1153,7 @@ export async function chatAgent(messages) {
     model,
     turns: messages.length,
     kind: result.kind,
+    scope: result.kind === 'search' ? result.scope : undefined,
     terms: result.kind === 'search' ? result.terms : [],
     must: result.kind === 'search' ? result.must : [],
     ...usage,

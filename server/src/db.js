@@ -43,6 +43,44 @@ db.function('wordmatch', {deterministic: true}, (haystack, needle) => {
   return re.test(String(haystack).toLowerCase()) ? 1 : 0;
 });
 
+// Like `wordmatch` but `needle` must be the HEAD (last word/phrase) of `haystack`.
+// A chat search for "milk" then means a product whose category IS milk
+// ("chocolate milk", "plant-based milk") — not "milk cake" or "ice cream".
+const _headRe = new Map();
+db.function('headmatch', {deterministic: true}, (haystack, needle) => {
+  if (!haystack || !needle) {
+    return 0;
+  }
+  const key = String(needle);
+  let re = _headRe.get(key);
+  if (!re) {
+    const n = key.toLowerCase().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    re = new RegExp(`(?:^|[^a-z0-9])${n}(?:e?s)?\\s*$`);
+    if (_headRe.size > 400) {
+      _headRe.clear();
+    }
+    _headRe.set(key, re);
+  }
+  return re.test(String(haystack).toLowerCase()) ? 1 : 0;
+});
+
+// True when `needle` is a COMPLETE quoted entry in the `tags` JSON string
+// (plural-tolerant). Lets item-scope search fall back to tags when the category
+// is a generic aisle word ("vegetables" -> tag "onions"), while NOT matching a
+// multi-word tag like "ice milk" for the needle "milk".
+db.function('tagexact', {deterministic: true}, (tags, needle) => {
+  if (!tags || !needle) {
+    return 0;
+  }
+  const h = String(tags).toLowerCase();
+  const n = String(needle).toLowerCase();
+  return h.includes(`"${n}"`) ||
+    h.includes(`"${n}s"`) ||
+    h.includes(`"${n}es"`)
+    ? 1
+    : 0;
+});
+
 db.exec(`
   CREATE TABLE IF NOT EXISTS flyers (
     id             TEXT PRIMARY KEY,
@@ -530,26 +568,47 @@ const STOP_TERMS = new Set([
   'deal',
   'deals',
   'cheap',
+  // aisle / department words — too broad as an expansion term, and they match
+  // every product carrying that tag.
+  'produce',
+  'dairy',
+  'beverage',
+  'beverages',
+  'pantry',
+  'frozen',
+  'bakery',
+  'deli',
+  'meat',
+  'seafood',
+  'snacks',
+  'household',
+  'cleaning',
+  'aisle',
 ]);
 
 /**
- * OR-search over up to 10 expansion terms (from the chat agent). Each term must
- * appear as a WHOLE word/phrase in p.name/info/category/tags (via `wordmatch`,
- * so "roma" hits "Roma Tomatoes" but not "Romaine"). Ranked by how many distinct
- * terms a product matches, then newest first.
+ * OR-search over up to 10 expansion terms (from the chat agent).
  *
- * `must` is an optional list of restriction words (e.g. child / infant / gluten
- * free): when given, every result must ALSO match at least one of them. This is
- * what lets a follow-up like "medication for kids" actually narrow the set
- * rather than just re-rank it.
+ * - `broad: false` (default) — the query is a specific item ("milk"): a term
+ *   includes a product only when it is the HEAD of `p.category` OR a complete
+ *   `p.tags` entry, so "Cadbury Dairy Milk" / "Milk Cake" / "ice milk" drop out
+ *   but "Yellow Onions" (category "vegetables", tag "onions") stays.
+ * - `broad: true` — an umbrella query ("medication", "what milk products…"): a
+ *   term matches as a whole word anywhere in name/info/category/tags.
  *
- * Returns { products, pages, terms, must, total } — `terms` / `must` are the
- * cleaned lists actually used.
+ * Ranking (`match_score`) always counts whole-word hits across the full text, so
+ * a brand-name hit in the product name still floats a match to the top.
+ *
+ * `must` is an optional list of restriction words: when given, every result must
+ * ALSO contain at least one of them (whole word, full text) — this is what lets
+ * "medication for kids" narrow rather than re-rank.
+ *
+ * Returns { products, pages, terms, must, total }.
  */
 export function searchProductsExpanded(
   termsIn,
   baseUrl,
-  {limit = 24, must: mustIn = []} = {},
+  {limit = 24, must: mustIn = [], broad = false} = {},
 ) {
   const norm = list =>
     [
@@ -567,19 +626,34 @@ export function searchProductsExpanded(
   const must = norm(mustIn);
 
   const lim = Math.max(1, Math.min(50, Number(limit) || 24));
-  // The searchable text for one product; `"` and `,` in the tags JSON act as
+  // Full searchable text for one product; `"` and `,` in the tags JSON act as
   // word boundaries, which is what we want.
   const blob =
     "lower(coalesce(p.name,'') || ' ' || coalesce(p.info,'') || ' ' || " +
     "coalesce(p.category,'') || ' ' || coalesce(p.tags,''))";
-  const group = `wordmatch(${blob}, ?)`; // one ? per term
+  const catExpr = "lower(coalesce(p.category,''))";
+  const tagsExpr = "coalesce(p.tags,'')";
 
-  const orClause = terms.map(() => group).join(' OR ');
+  // Ranking: +1 for a whole-word hit anywhere, +3 when the product's category IS
+  // the term (so "Lactantia Purfiltre Milk" [milk] outranks "Coconut Milk").
   const scoreExpr = terms
-    .map(() => `(CASE WHEN ${group} THEN 1 ELSE 0 END)`)
+    .map(
+      () =>
+        `(CASE WHEN wordmatch(${blob}, ?) THEN 1 ELSE 0 END) + ` +
+        `(CASE WHEN ${catExpr} = ? THEN 3 ELSE 0 END)`,
+    )
     .join(' + ');
+  const scoreBinds = terms.flatMap(t => [t, t]);
+
+  // Inclusion: broad = anywhere; item = category head or an exact tag.
+  const itemGroup = `(headmatch(${catExpr}, ?) OR tagexact(${tagsExpr}, ?))`;
+  const orClause = terms
+    .map(() => (broad ? `wordmatch(${blob}, ?)` : itemGroup))
+    .join(' OR ');
+  const inclBinds = broad ? terms : terms.flatMap(t => [t, t]);
+
   const mustClause = must.length
-    ? ` AND (${must.map(() => group).join(' OR ')})`
+    ? ` AND (${must.map(() => `wordmatch(${blob}, ?)`).join(' OR ')})`
     : '';
   const where = `WHERE (${orClause})${mustClause}`;
 
@@ -592,8 +666,8 @@ export function searchProductsExpanded(
         ORDER BY match_score DESC, p.created_at DESC, p.rowid DESC
         LIMIT ?`,
     )
-    // bind order = statement text: SELECT score (terms), WHERE (terms, must), LIMIT
-    .all(...terms, ...terms, ...must, lim);
+    // bind order = statement text: SELECT score, WHERE (incl, must), LIMIT
+    .all(...scoreBinds, ...inclBinds, ...must, lim);
 
   const total = db
     .prepare(
@@ -601,7 +675,7 @@ export function searchProductsExpanded(
          FROM products p JOIN flyers f ON f.id = p.flyer_id
         ${where}`,
     )
-    .get(...terms, ...must).n;
+    .get(...inclBinds, ...must).n;
 
   const products = rows.map(r => mapProductRow(r, baseUrl));
   return {products, pages: collectPages(products, baseUrl), terms, must, total};
