@@ -9,7 +9,10 @@ import {fileURLToPath} from 'node:url';
 
 import Database from 'better-sqlite3';
 
-import {isDepartment} from './departments.js';
+import {isDepartment, matchDepartments} from './departments.js';
+
+/** Classification of the Search-box text, memoised by the normalised query. */
+const _classCache = new Map();
 
 const DATA_DIR = join(dirname(fileURLToPath(import.meta.url)), '..', 'data');
 export const PAGES_DIR = join(DATA_DIR, 'pages');
@@ -279,6 +282,7 @@ export const saveExtraction = db.transaction(
       i++;
     }
 
+    _classCache.clear(); // new categories/tags may change how a query classifies
     return {flyerId, savedProducts: products.length};
   },
 );
@@ -297,6 +301,7 @@ export const applyCategories = db.transaction(rows => {
       tags: r.tags && r.tags.length ? JSON.stringify(r.tags) : null,
     });
   }
+  _classCache.clear();
 });
 
 /** Distinct categories whose products still have no department. */
@@ -402,22 +407,85 @@ const toList = v =>
 
 const truthy = v => v === true || v === 1 || v === '1' || v === 'true';
 
-// { clause, params } for the shared WHERE. Both callers JOIN flyers as `f`.
+const CAT_EXPR = "lower(coalesce(p.category,''))";
+const TAGS_EXPR = "coalesce(p.tags,'')";
+
+/**
+ * Decide how a Search-tab query should match:
+ * - `department` — an aisle word ("clothing", "appliances", "cleaning supplies")
+ *   → filter by department; leftover words become rank-only `scoreTerms`.
+ * - `item` — the whole query names something we stock (its head is a category
+ *   head or an exact tag) → precise `headmatch`/`tagexact` match.
+ * - `like` — anything else (brands, typos, "greek yogurt") → today's `LIKE %w%`.
+ * Returns `{ mode, conds, params, scoreTerms }` (conds/params are the query
+ * portion of the WHERE only).
+ */
+function classifyQuery(q) {
+  const raw = String(q || '')
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, ' ');
+  if (!raw) {
+    return {mode: 'empty', conds: [], params: [], scoreTerms: []};
+  }
+  const cached = _classCache.get(raw);
+  if (cached) {
+    return cached;
+  }
+  const tokens = raw.split(' ').filter(Boolean).slice(0, 6);
+
+  let out;
+  const dep = matchDepartments(raw);
+  if (dep) {
+    out = {
+      mode: 'department',
+      conds: [`p.department IN (${dep.deptIds.map(() => '?').join(',')})`],
+      params: [...dep.deptIds],
+      scoreTerms: tokens.filter(t => !dep.consumed.has(t)),
+    };
+  } else if (
+    db
+      .prepare(
+        `SELECT 1 FROM products p
+          WHERE headmatch(${CAT_EXPR}, ?) OR tagexact(${TAGS_EXPR}, ?)
+          LIMIT 1`,
+      )
+      .get(raw, raw)
+  ) {
+    out = {
+      mode: 'item',
+      conds: [`(headmatch(${CAT_EXPR}, ?) OR tagexact(${TAGS_EXPR}, ?))`],
+      params: [raw, raw],
+      scoreTerms: [raw], // score the whole phrase, not its words
+    };
+  } else {
+    const conds = [];
+    const params = [];
+    for (const w of tokens) {
+      conds.push(
+        '(p.name LIKE ? OR p.info LIKE ? OR p.category LIKE ? OR p.tags LIKE ?)',
+      );
+      const like = `%${w}%`;
+      params.push(like, like, like, like);
+    }
+    out = {mode: 'like', conds, params, scoreTerms: tokens};
+  }
+
+  if (_classCache.size > 2000) {
+    _classCache.clear();
+  }
+  _classCache.set(raw, out);
+  return out;
+}
+
+// { clause, params, query } for the shared WHERE. Both callers JOIN flyers as `f`.
 function buildWhere({q, departments, stores, statuses, onSale}, today) {
   const conds = [];
   const params = [];
 
-  for (const w of String(q || '')
-    .trim()
-    .split(/\s+/)
-    .filter(Boolean)
-    .slice(0, 6)) {
-    conds.push(
-      '(p.name LIKE ? OR p.info LIKE ? OR p.category LIKE ? OR p.tags LIKE ?)',
-    );
-    const like = `%${w}%`;
-    params.push(like, like, like, like);
-  }
+  const qw = classifyQuery(q);
+  conds.push(...qw.conds);
+  params.push(...qw.params);
 
   const deps = toList(departments)
     .map(s => s.toLowerCase())
@@ -443,7 +511,11 @@ function buildWhere({q, departments, stores, statuses, onSale}, today) {
     conds.push('p.on_sale = 1');
   }
 
-  return {clause: conds.length ? `WHERE ${conds.join(' AND ')}` : '', params};
+  return {
+    clause: conds.length ? `WHERE ${conds.join(' AND ')}` : '',
+    params,
+    query: qw,
+  };
 }
 
 // The product columns every search selects. `searchProductsExpanded` appends a
@@ -517,7 +589,7 @@ export function searchProducts(
   const off = Math.max(0, Number(offset) || 0);
   const today = todayIso();
 
-  const {clause, params} = buildWhere(
+  const {clause, params, query} = buildWhere(
     {q, departments, stores, statuses, onSale},
     today,
   );
@@ -530,24 +602,50 @@ export function searchProducts(
     )
     .get(...params).n;
 
-  // Plain browse (no query, no filters): rank by flyer status so expired
-  // flyers sink to the bottom. Any narrowing keeps the plain newest-first order.
+  // Relevance: +3 when the category IS the term, +3 when the term is the
+  // category head, +2 for an exact tag, +1 for a whole-word name hit — so a
+  // "salmon" search surfaces the salmon fillet above the combo tiles it's merely
+  // tagged in, and "yogurt" puts plain yogurt above frozen-yogurt novelties.
+  const terms = query.scoreTerms;
+  const scored = terms.length > 0;
+  const scoreExpr = terms
+    .map(
+      () =>
+        `(CASE WHEN ${CAT_EXPR} = ? THEN 3 ELSE 0 END) + ` +
+        `3 * headmatch(${CAT_EXPR}, ?) + 2 * tagexact(${TAGS_EXPR}, ?) + ` +
+        "(CASE WHEN wordmatch(lower(coalesce(p.name,'') || ' ' || " +
+        "coalesce(p.info,'')), ?) THEN 1 ELSE 0 END)",
+    )
+    .join(' + ');
+  const scoreBinds = terms.flatMap(t => [t, t, t, t]);
+
+  // Plain browse and a bare aisle browse rank by flyer status (expired sinks);
+  // a scored query ranks by relevance; anything else stays newest-first.
   const plain = clause === '';
-  const orderBy = plain
-    ? `ORDER BY ${STATUS_RANK}, p.created_at DESC, p.rowid DESC`
-    : 'ORDER BY p.created_at DESC, p.rowid DESC';
-  const orderParams = plain ? [today, today] : [];
+  let orderBy;
+  let orderParams;
+  if (scored) {
+    orderBy = 'ORDER BY score DESC, p.created_at DESC, p.rowid DESC';
+    orderParams = [];
+  } else if (plain || query.mode === 'department') {
+    orderBy = `ORDER BY ${STATUS_RANK}, p.created_at DESC, p.rowid DESC`;
+    orderParams = [today, today];
+  } else {
+    orderBy = 'ORDER BY p.created_at DESC, p.rowid DESC';
+    orderParams = [];
+  }
 
   const rows = db
     .prepare(
-      `SELECT ${PRODUCT_COLS}
+      `SELECT ${PRODUCT_COLS}${scored ? `, (${scoreExpr}) AS score` : ''}
          FROM products p
          JOIN flyers f ON f.id = p.flyer_id
          ${clause}
         ${orderBy}
         LIMIT ? OFFSET ?`,
     )
-    .all(...params, ...orderParams, lim, off);
+    // bind order = statement text: SELECT score, WHERE, ORDER (status), LIMIT/OFFSET
+    .all(...scoreBinds, ...params, ...orderParams, lim, off);
 
   const products = rows.map(r => mapProductRow(r, baseUrl));
   const pages = collectPages(products, baseUrl);
