@@ -7,16 +7,19 @@ type Props = {
   title: string;
   /** Muted text on the right, e.g. "815 items". */
   trailing?: string;
+  /** A control on the right (e.g. a "New chat" button). Wins over `trailing`. */
+  action?: React.ReactNode;
 };
 
 /** The small masthead at the top of Search and Upload. */
-function ScreenHeader({title, trailing}: Props): React.JSX.Element {
+function ScreenHeader({title, trailing, action}: Props): React.JSX.Element {
   const {styles} = useThemedStyles(makeStyles);
   return (
     <View style={styles.wrap}>
       <Text style={styles.title}>{title}</Text>
       <View style={styles.rule} />
-      {trailing ? <Text style={styles.trailing}>{trailing}</Text> : null}
+      {action ??
+        (trailing ? <Text style={styles.trailing}>{trailing}</Text> : null)}
     </View>
   );
 }

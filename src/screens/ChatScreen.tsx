@@ -276,6 +276,21 @@ function ChatScreen(): React.JSX.Element {
 
   const stop = () => abortRef.current?.abort();
 
+  const newChat = () => {
+    abortRef.current?.abort();
+    reqId.current++;
+    setMessages([GREETING]);
+    setInput('');
+    setSending(false);
+    setExpanded(new Set());
+    setInfoProduct(null);
+    setFlyerProduct(null);
+    Keyboard.dismiss();
+    requestAnimationFrame(() =>
+      listRef.current?.scrollToOffset({offset: 0, animated: false}),
+    );
+  };
+
   const openInFlyer = (product: Product) => {
     setInfoProduct(null);
     // Let the info sheet dismiss before the next Modal — stacked Modal
@@ -369,7 +384,24 @@ function ChatScreen(): React.JSX.Element {
 
   return (
     <View style={styles.container}>
-      <ScreenHeader title="Chat" />
+      <ScreenHeader
+        title="Chat"
+        action={
+          messages.length > 1 ? (
+            <Pressable
+              onPress={newChat}
+              accessibilityRole="button"
+              accessibilityLabel="Start a new chat"
+              hitSlop={8}
+              style={({pressed}) => [
+                styles.newChatBtn,
+                pressed && styles.pressed,
+              ]}>
+              <Text style={styles.newChatText}>New chat</Text>
+            </Pressable>
+          ) : undefined
+        }
+      />
 
       <KeyboardAvoidingView
         style={styles.flex}
@@ -460,6 +492,21 @@ const makeStyles = (c: Palette) =>
   StyleSheet.create({
     container: {flex: 1, backgroundColor: c.background},
     flex: {flex: 1},
+
+    newChatBtn: {
+      paddingVertical: spacing.xs,
+      paddingHorizontal: spacing.sm + 2,
+      borderRadius: radius.md,
+      borderWidth: 1,
+      borderColor: c.border,
+      backgroundColor: c.surface,
+    },
+    newChatText: {
+      color: c.primary,
+      fontFamily: fonts.semibold,
+      fontSize: 12,
+      fontWeight: '600',
+    },
     list: {padding: spacing.md, gap: spacing.md, flexGrow: 1},
 
     rowLeft: {alignItems: 'flex-start', gap: spacing.sm},
