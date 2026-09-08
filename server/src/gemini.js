@@ -987,3 +987,162 @@ export async function assignDepartments(items) {
 
   return {result, usage: readUsage(json), finishReason};
 }
+
+// ---------------------------------------------------------------------------
+// Chat agent — turns a shopper's message into either search terms or a reply.
+// One Gemini call per turn, no tool round-trip: the model returns a single
+// structured object and the server acts on it directly.
+// ---------------------------------------------------------------------------
+
+const CHAT_SYSTEM = `You are the shopping assistant inside a grocery-flyer app. The user browses products extracted from local store flyers.
+
+When the user is looking for a product (or a type of product), use action "search":
+- "terms": specific lowercase search terms for THAT item — the plain word, its singular/plural, close synonyms, and 2-4 real brand names likely printed on a flyer for it. Do NOT include broad aisle words like "food", "produce", "grocery", "dairy". Max 8 terms, no duplicates, nothing longer than 3 words.
+- "intent": just the item the user wants, 1-4 words, no verbs — e.g. "grapes", "toilet paper", "green grapes".
+
+Otherwise use action "reply" with a 1-2 sentence "reply". Do not answer general-knowledge questions unrelated to grocery shopping — say you can only help find products in the flyers.
+
+Always fill every field: unused ones as "" or [].`;
+
+const CHAT_SCHEMA = {
+  type: 'OBJECT',
+  properties: {
+    action: {type: 'STRING', enum: ['search', 'reply']},
+    terms: {type: 'ARRAY', items: {type: 'STRING'}},
+    intent: {type: 'STRING'},
+    reply: {type: 'STRING'},
+  },
+  required: ['action', 'terms', 'intent', 'reply'],
+};
+
+const GENERIC_REPLY =
+  'I can only help you find products in the flyers. Try "find me some grapes" or "I need toilet paper".';
+
+// Same character rules as cleanCategory: lowercase, drop punctuation, collapse
+// whitespace. Keep 2-40 chars, at most 3 words. Dedupe, cap at 10.
+function cleanTerms(value) {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  const seen = new Set();
+  const out = [];
+  for (const raw of value) {
+    const t = (raw ?? '')
+      .toString()
+      .toLowerCase()
+      .replace(/[^a-z0-9\s&/-]/g, '')
+      .replace(/\s+/g, ' ')
+      .trim();
+    if (!t || t.length < 2 || t.length > 40 || t.split(' ').length > 3) {
+      continue;
+    }
+    if (seen.has(t)) {
+      continue;
+    }
+    seen.add(t);
+    out.push(t);
+    if (out.length >= 10) {
+      break;
+    }
+  }
+  return out;
+}
+
+/**
+ * @param {Array<{ role: 'user'|'assistant', content: string }>} messages
+ *   Trimmed recent history, ending with the new user turn.
+ * @returns {Promise<
+ *   | { kind: 'search', terms: string[], intent: string, usage: object }
+ *   | { kind: 'reply', text: string, usage: object }
+ * >}
+ */
+export async function chatAgent(messages) {
+  const lastUser = messages[messages.length - 1]?.content ?? '';
+
+  if (process.env.GEMINI_API_KEY === 'MOCK') {
+    return {
+      kind: 'search',
+      terms: cleanTerms(
+        lastUser
+          .toLowerCase()
+          .split(/\s+/)
+          .filter(w => w.length > 2),
+      ),
+      intent: lastUser.slice(0, 40),
+      usage: {mock: true},
+    };
+  }
+
+  const {apiKey, model} = config();
+
+  const contents = messages.map(m => ({
+    role: m.role === 'assistant' ? 'model' : 'user',
+    parts: [{text: m.content}],
+  }));
+
+  const json = await callGemini(
+    {
+      systemInstruction: {parts: [{text: CHAT_SYSTEM}]},
+      contents,
+      generationConfig: {
+        temperature: 0,
+        responseMimeType: 'application/json',
+        responseSchema: CHAT_SCHEMA,
+        thinkingConfig: {thinkingBudget: 0},
+        maxOutputTokens: 256,
+      },
+    },
+    apiKey,
+    model,
+  );
+
+  const cand = json.candidates?.[0];
+  const text = cand?.content?.parts?.[0]?.text ?? '';
+  const usage = readUsage(json);
+
+  let parsed = {};
+  try {
+    parsed = JSON.parse(text) || {};
+  } catch {
+    // truncated / non-JSON — fall through to the generic reply
+  }
+
+  const terms = cleanTerms(parsed.terms);
+  const result =
+    parsed.action === 'search' && terms.length
+      ? {
+          kind: 'search',
+          terms,
+          intent: String(parsed.intent || '').slice(0, 60),
+          usage,
+        }
+      : {
+          kind: 'reply',
+          text: (String(parsed.reply || '').trim() || GENERIC_REPLY).slice(
+            0,
+            400,
+          ),
+          usage,
+        };
+
+  console.log(
+    `[gemini] chat ${result.kind}  turns=${messages.length}  prompt=${n(
+      usage.promptTokens,
+    )} output=${n(usage.outputTokens)} thoughts=${n(
+      usage.thoughtsTokens,
+    )} total=${n(usage.totalTokens)}` +
+      (result.kind === 'search' ? `  [${result.terms.join(', ')}]` : ''),
+  );
+
+  await appendUsageLog({
+    at: new Date().toISOString(),
+    op: 'chat',
+    model,
+    turns: messages.length,
+    kind: result.kind,
+    terms: result.kind === 'search' ? result.terms : [],
+    ...usage,
+  });
+
+  return result;
+}

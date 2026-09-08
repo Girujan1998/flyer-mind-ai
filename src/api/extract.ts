@@ -131,6 +131,34 @@ export function extractFlyer(
   });
 }
 
+export type ChatRole = 'user' | 'assistant';
+export type ChatTurn = {role: ChatRole; content: string};
+export type ChatResponse = {
+  reply: string;
+  products: Product[];
+  pages: FlyerPage[];
+  /** The expansion terms the agent actually searched; [] for a plain reply. */
+  terms: string[];
+};
+
+/**
+ * Ask the Chat-tab agent. The server runs one Gemini call to turn the latest
+ * user turn into either a product search (expanded with synonyms / brand names)
+ * or a short reply. `messages` should be a trimmed recent history ending with
+ * the new user turn.
+ */
+export function sendChat(
+  messages: ChatTurn[],
+  signal?: AbortSignal,
+): Promise<ChatResponse> {
+  return api<ChatResponse>('/chat', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({messages}),
+    signal,
+  });
+}
+
 export type SearchResult = {
   products: Product[];
   pages: FlyerPage[];

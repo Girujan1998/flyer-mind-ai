@@ -386,6 +386,62 @@ function buildWhere({q, departments, stores, statuses, onSale}, today) {
   return {clause: conds.length ? `WHERE ${conds.join(' AND ')}` : '', params};
 }
 
+// The product columns every search selects. `searchProductsExpanded` appends a
+// `match_score` column; `mapProductRow` ignores anything it doesn't name.
+const PRODUCT_COLS = `p.id, p.flyer_id, p.page, p.name, p.price, p.price_value, p.info,
+       p.box, p.confidence, p.category, p.tags, p.department,
+       p.was_price, p.promo_text, p.on_sale, p.has_thumb,
+       f.store, f.valid_from, f.valid_to`;
+
+/** One DB row -> the API product shape. */
+function mapProductRow(r, baseUrl) {
+  return {
+    id: r.id,
+    flyerId: r.flyer_id,
+    page: r.page,
+    name: titleCaseName(r.name),
+    price: r.price || '',
+    priceValue: r.price_value,
+    info: r.info || '',
+    box: r.box ? JSON.parse(r.box) : null,
+    confidence: r.confidence,
+    category: r.category || '',
+    tags: r.tags ? safeJsonArray(r.tags) : [],
+    department: r.department || '',
+    wasPrice: r.was_price || '',
+    promoText: r.promo_text || '',
+    onSale: !!r.on_sale,
+    store: r.store || '',
+    validFrom: r.valid_from || '',
+    validTo: r.valid_to || '',
+    thumb: r.has_thumb ? `${baseUrl}/thumbs/${r.flyer_id}/${r.id}.jpg` : null,
+  };
+}
+
+/** The distinct flyer pages a product list references, with pixel size + URL. */
+function collectPages(products, baseUrl) {
+  const seen = new Set();
+  const pages = [];
+  for (const p of products) {
+    const key = `${p.flyerId}:${p.page}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const dims = db
+      .prepare('SELECT width, height FROM pages WHERE flyer_id = ? AND page = ?')
+      .get(p.flyerId, p.page);
+    if (dims) {
+      pages.push({
+        flyerId: p.flyerId,
+        page: p.page,
+        width: dims.width,
+        height: dims.height,
+        image: `${baseUrl}/pages/${p.flyerId}/${p.page}.jpg`,
+      });
+    }
+  }
+  return pages;
+}
+
 /**
  * Paginated search over all stored products, newest first.
  * `q` matches name/info/category/tags; `departments` / `stores` / `statuses`
@@ -424,10 +480,7 @@ export function searchProducts(
 
   const rows = db
     .prepare(
-      `SELECT p.id, p.flyer_id, p.page, p.name, p.price, p.price_value, p.info,
-              p.box, p.confidence, p.category, p.tags, p.department,
-              p.was_price, p.promo_text, p.on_sale, p.has_thumb,
-              f.store, f.valid_from, f.valid_to
+      `SELECT ${PRODUCT_COLS}
          FROM products p
          JOIN flyers f ON f.id = p.flyer_id
          ${clause}
@@ -436,52 +489,80 @@ export function searchProducts(
     )
     .all(...params, ...orderParams, lim, off);
 
-  const products = rows.map(r => ({
-    id: r.id,
-    flyerId: r.flyer_id,
-    page: r.page,
-    name: titleCaseName(r.name),
-    price: r.price || '',
-    priceValue: r.price_value,
-    info: r.info || '',
-    box: r.box ? JSON.parse(r.box) : null,
-    confidence: r.confidence,
-    category: r.category || '',
-    tags: r.tags ? safeJsonArray(r.tags) : [],
-    department: r.department || '',
-    wasPrice: r.was_price || '',
-    promoText: r.promo_text || '',
-    onSale: !!r.on_sale,
-    store: r.store || '',
-    validFrom: r.valid_from || '',
-    validTo: r.valid_to || '',
-    thumb: r.has_thumb
-      ? `${baseUrl}/thumbs/${r.flyer_id}/${r.id}.jpg`
-      : null,
-  }));
-
-  // The distinct pages this result set references, with their pixel size + URL.
-  const seen = new Set();
-  const pages = [];
-  for (const p of products) {
-    const key = `${p.flyerId}:${p.page}`;
-    if (seen.has(key)) continue;
-    seen.add(key);
-    const dims = db
-      .prepare('SELECT width, height FROM pages WHERE flyer_id = ? AND page = ?')
-      .get(p.flyerId, p.page);
-    if (dims) {
-      pages.push({
-        flyerId: p.flyerId,
-        page: p.page,
-        width: dims.width,
-        height: dims.height,
-        image: `${baseUrl}/pages/${p.flyerId}/${p.page}.jpg`,
-      });
-    }
-  }
+  const products = rows.map(r => mapProductRow(r, baseUrl));
+  const pages = collectPages(products, baseUrl);
 
   return {products, pages, total, hasMore: off + rows.length < total};
+}
+
+/** Broad words that would blow a query wide open — dropped before searching. */
+const STOP_TERMS = new Set([
+  'food',
+  'grocery',
+  'groceries',
+  'item',
+  'items',
+  'product',
+  'products',
+  'sale',
+  'deal',
+  'deals',
+  'cheap',
+]);
+
+/**
+ * OR-search over up to 10 expansion terms (from the chat agent). Each term
+ * matches p.name/info/category/tags LIKE %term%. Ranked by how many distinct
+ * terms a product matches, then newest first. Returns { products, pages, terms,
+ * total } — `terms` is the cleaned list actually searched.
+ */
+export function searchProductsExpanded(termsIn, baseUrl, {limit = 24} = {}) {
+  const terms = [
+    ...new Set(
+      (Array.isArray(termsIn) ? termsIn : [])
+        .map(t => String(t).trim().toLowerCase())
+        .filter(t => t && !STOP_TERMS.has(t)),
+    ),
+  ].slice(0, 10);
+
+  if (!terms.length) {
+    return {products: [], pages: [], terms: [], total: 0};
+  }
+
+  const lim = Math.max(1, Math.min(50, Number(limit) || 24));
+  const group =
+    '(p.name LIKE ? OR p.info LIKE ? OR p.category LIKE ? OR p.tags LIKE ?)';
+  const orClause = terms.map(() => group).join(' OR ');
+  const scoreExpr = terms
+    .map(() => `(CASE WHEN ${group} THEN 1 ELSE 0 END)`)
+    .join(' + ');
+  // `%term%` x4 (name/info/category/tags) per term.
+  const likeParams = terms.flatMap(t => {
+    const like = `%${t}%`;
+    return [like, like, like, like];
+  });
+
+  const rows = db
+    .prepare(
+      `SELECT ${PRODUCT_COLS}, (${scoreExpr}) AS match_score
+         FROM products p
+         JOIN flyers f ON f.id = p.flyer_id
+        WHERE ${orClause}
+        ORDER BY match_score DESC, p.created_at DESC, p.rowid DESC
+        LIMIT ?`,
+    )
+    .all(...likeParams, ...likeParams, lim); // score binds, then WHERE binds
+
+  const total = db
+    .prepare(
+      `SELECT COUNT(*) AS n
+         FROM products p JOIN flyers f ON f.id = p.flyer_id
+        WHERE ${orClause}`,
+    )
+    .get(...likeParams).n;
+
+  const products = rows.map(r => mapProductRow(r, baseUrl));
+  return {products, pages: collectPages(products, baseUrl), terms, total};
 }
 
 export function totalProducts() {
