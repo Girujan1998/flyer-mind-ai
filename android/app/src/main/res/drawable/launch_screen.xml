@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Cold-start window background: shown instantly at process start, before
+     any Activity code runs. MainActivity swaps the theme back to AppTheme
+     in onCreate() once RN's root view is about to attach. -->
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+    <item android:drawable="@color/splash_background"/>
+    <item android:gravity="center" android:width="120dp" android:height="120dp">
+        <bitmap android:src="@drawable/launch_logo" android:gravity="center"/>
+    </item>
+</layer-list>

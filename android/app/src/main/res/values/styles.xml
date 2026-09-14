@@ -6,4 +6,13 @@
         <item name="android:editTextBackground">@drawable/rn_edit_text_material</item>
     </style>
 
+    <!-- MainActivity's theme for the cold-start window only (see AndroidManifest.xml
+         and MainActivity.onCreate) — a solid brand background with the centered
+         logo mark, shown before any Activity code or RN content can render.
+         API 31+ overrides this in values-v31/ to use the platform SplashScreen
+         API instead, which ignores a plain windowBackground drawable's icon layer. -->
+    <style name="Theme.App.SplashScreen" parent="AppTheme">
+        <item name="android:windowBackground">@drawable/launch_screen</item>
+    </style>
+
 </resources>
