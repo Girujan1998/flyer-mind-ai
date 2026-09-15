@@ -218,6 +218,11 @@ export type DealQuality = 'great' | 'good' | 'average' | 'poor';
 export type PriceInsight = {
   currentPrice: number | null;
   min90d: number | null;
+  /** The flyer week the 90-day low happened, "YYYY-MM-DD"; null if unknown. */
+  min90dValidFrom: string | null;
+  min90dValidTo: string | null;
+  /** Which retailer had that low; null if unknown. */
+  min90dStore: string | null;
   median90d: number | null;
   isLowestIn3Months: boolean;
   isLowestIn6Months: boolean;

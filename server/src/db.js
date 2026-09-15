@@ -658,9 +658,16 @@ export function priceInsight(canonicalProductIdOrIds, {store} = {}) {
   const current = priced[priced.length - 1];
   const windowCutoff = daysAgoIso(90);
   const windowRows = priced.filter(h => !h.validFrom || h.validFrom >= windowCutoff);
-  const pool = (windowRows.length ? windowRows : priced).map(h => h.priceValue);
-  const min90d = Math.min(...pool);
-  const median90d = median(pool);
+  const windowSightings = windowRows.length ? windowRows : priced;
+  // The sighting where the 90-day low actually happened — `windowSightings`
+  // is already date-ordered (priceHistory sorts by valid_from ASC), and `<=`
+  // keeps the LATEST tie, so "when was it lowest" answers with the most
+  // recent time that price was seen, not the first.
+  const minSighting = windowSightings.reduce((best, h) =>
+    h.priceValue <= best.priceValue ? h : best,
+  );
+  const min90d = minSighting.priceValue;
+  const median90d = median(windowSightings.map(h => h.priceValue));
 
   // A single sighting is only ever "today's own price" — with nothing else to
   // compare it against, don't claim a deal quality at all (it would otherwise
@@ -721,6 +728,11 @@ export function priceInsight(canonicalProductIdOrIds, {store} = {}) {
   return {
     currentPrice: current.priceValue,
     min90d,
+    // The flyer week the 90-day low actually happened, and where — so "when
+    // was it lowest" has an answer, not just a number.
+    min90dValidFrom: minSighting.validFrom || null,
+    min90dValidTo: minSighting.validTo || null,
+    min90dStore: minSighting.store || null,
     median90d,
     isLowestIn3Months: isLowestInMonths(3),
     isLowestIn6Months: isLowestInMonths(6),

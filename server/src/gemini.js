@@ -1130,7 +1130,7 @@ sale — use action "price_insight":
   ingredient-style ask — "what products have tomatoes in them", "anything
   with peanuts" — where a pasta sauce or a snack listing it as an ingredient
   should also count.
-- "insightType": "deal_quality" (is a price good — incl. "is $X a good price"), "lowest_price" (is this the lowest it's been recently), "trend" (how has it changed), "store_compare" (which store is cheapest), or "sale_frequency" (how often it goes on sale). Pick the closest one.
+- "insightType": "deal_quality" (is a price good — incl. "is $X a good price"), "lowest_price" (is THIS/the current price the lowest it's been recently — a yes/no), "when_lowest" (WHEN/what week was the price lowest, or "what's the lowest it's been"), "trend" (how has it changed), "store_compare" (which store is cheapest), or "sale_frequency" (how often it goes on sale). Pick the closest one.
 - "targetPrice": the dollar amount they mentioned as a NUMBER (e.g. "$3.99" -> 3.99). 0 if none mentioned.
 
 If the user asks to be told/notified/alerted when something's price drops to
@@ -1155,7 +1155,14 @@ const CHAT_SCHEMA = {
     productHint: {type: 'STRING'},
     insightType: {
       type: 'STRING',
-      enum: ['deal_quality', 'lowest_price', 'trend', 'store_compare', 'sale_frequency'],
+      enum: [
+        'deal_quality',
+        'lowest_price',
+        'when_lowest',
+        'trend',
+        'store_compare',
+        'sale_frequency',
+      ],
     },
     targetPrice: {type: 'NUMBER'},
     comparison: {type: 'STRING', enum: ['lt', 'lte']},
@@ -1175,7 +1182,14 @@ const CHAT_SCHEMA = {
   ],
 };
 
-const INSIGHT_TYPES = ['deal_quality', 'lowest_price', 'trend', 'store_compare', 'sale_frequency'];
+const INSIGHT_TYPES = [
+  'deal_quality',
+  'lowest_price',
+  'when_lowest',
+  'trend',
+  'store_compare',
+  'sale_frequency',
+];
 
 const GENERIC_REPLY =
   'I can only help you find products in the flyers. Try "find me some grapes" or "I need toilet paper".';

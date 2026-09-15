@@ -447,12 +447,24 @@ app.post('/alerts', express.json({limit: '4kb'}), (req, res) => {
   }
 });
 
+// "2026-09-03" -> "Sep 3" — for naming the flyer week a price happened in.
+function formatWeekOf(iso) {
+  if (!iso) {
+    return null;
+  }
+  const d = new Date(`${iso}T00:00:00Z`);
+  return Number.isNaN(d.getTime())
+    ? null
+    : d.toLocaleDateString('en-US', {month: 'short', day: 'numeric', timeZone: 'UTC'});
+}
+
 // Deterministic reply text for a "price_insight" chat turn — every number in
 // here comes straight from priceInsight()'s SQL aggregates, never from Gemini,
 // so the agent can never state a price or trend it made up.
 function composePriceInsightReply(agent, insight) {
   const {productHint, insightType, targetPrice} = agent;
   const fmt = v => (v == null ? null : `$${v.toFixed(2)}`);
+  const min90dWeek = formatWeekOf(insight.min90dValidFrom);
   // A single sighting is only ever today's own price — nothing to compare it
   // against, so never claim a deal quality / "lowest in N months" from it.
   const notEnoughHistory = insight.sightings < 2;
@@ -477,7 +489,16 @@ function composePriceInsightReply(agent, insight) {
       }
       return insight.isLowestIn3Months
         ? `Yes — ${fmt(insight.currentPrice)} is the lowest ${productHint} has been in at least 3 months.`
-        : `Not quite — ${productHint} is ${fmt(insight.currentPrice)} now; its lowest in the last 3 months was ${fmt(insight.min90d)}.`;
+        : `Not quite — ${productHint} is ${fmt(insight.currentPrice)} now; its lowest in the last 3 months was ${fmt(insight.min90d)}` +
+            (min90dWeek ? `, the week of ${min90dWeek}` : '') +
+            '.';
+    case 'when_lowest': {
+      if (notEnoughHistory || !min90dWeek) {
+        return `I've only seen one price for ${productHint} so far (${fmt(insight.currentPrice)}) — not enough history to say when it was lowest.`;
+      }
+      const atStore = insight.min90dStore ? ` at ${insight.min90dStore}` : '';
+      return `${fmt(insight.min90d)}${atStore}, the week of ${min90dWeek} — that's the lowest ${productHint} has been recently.`;
+    }
     case 'store_compare': {
       if (!insight.byStore.length) {
         return `I don't have store-by-store data on ${productHint} yet.`;
@@ -492,7 +513,11 @@ function composePriceInsightReply(agent, insight) {
         ? `${productHint} tends to go on sale about every ${insight.saleFrequencyDays} days.`
         : `I don't have enough sale history on ${productHint} yet to tell.`;
     case 'trend':
-      return `${productHint} is ${fmt(insight.currentPrice)} now; it's ranged from ${fmt(insight.min90d)} to around ${fmt(insight.median90d)} in the last 90 days.`;
+      return (
+        `${productHint} is ${fmt(insight.currentPrice)} now; it's ranged from ${fmt(insight.min90d)}` +
+        (min90dWeek ? ` (the week of ${min90dWeek})` : '') +
+        ` to around ${fmt(insight.median90d)} in the last 90 days.`
+      );
     case 'deal_quality':
     default:
       return insight.dealQuality
