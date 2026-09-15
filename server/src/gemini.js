@@ -7,6 +7,7 @@ import {dirname, join} from 'node:path';
 import {fileURLToPath} from 'node:url';
 
 import {DEPARTMENTS, cleanDepartment} from './departments.js';
+import {normalizeStore} from './stores.js';
 
 const API_BASE = 'https://generativelanguage.googleapis.com/v1beta/models';
 const LOG_FILE = join(
@@ -223,7 +224,7 @@ export async function extractFlyerMeta(page1Jpeg) {
       [validFrom, validTo] = [validTo, validFrom];
     }
     meta = {
-      store: (v.store || '').toString().trim().slice(0, 120),
+      store: normalizeStore(v.store).slice(0, 120),
       validFrom,
       validTo,
       confidence: isFinite(confidence)

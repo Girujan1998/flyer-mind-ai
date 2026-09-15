@@ -317,6 +317,20 @@ export function productCountForFlyer(flyerId) {
   return stmts.productsForFlyer.get(flyerId).n;
 }
 
+/** Every distinct retailer name currently stored — for the store-name backfill. */
+export function distinctStores() {
+  return db
+    .prepare("SELECT DISTINCT store FROM flyers WHERE store IS NOT NULL AND store <> ''")
+    .all()
+    .map(r => r.store);
+}
+
+/** Rewrite every flyer carrying `oldValue` as its store to `newValue`. Returns the row count changed. */
+export function renameStore(oldValue, newValue) {
+  return db.prepare('UPDATE flyers SET store = ? WHERE store = ?').run(newValue, oldValue)
+    .changes;
+}
+
 /**
  * Persist one extraction. `pages` carry `jpegBase64`; `products` are the shape
  * gemini.js returns; `thumbs` is a Map<productIndex, JPEG Buffer> from
