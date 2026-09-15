@@ -642,6 +642,36 @@ export function priceHistory(canonicalProductIdOrIds, {store, months} = {}) {
 }
 
 /**
+ * How a flyer price is actually priced — "$3.17/lb" and "$5.99/3 lb" and
+ * "$4.99 each" and "2/$7" are NOT directly comparable dollar figures even
+ * though `price_value` is just a plain number for all four ("carrots" has
+ * real sightings at 94¢/lb, $1.99, and $2.44 — mixing per-pound and flat
+ * pricing under one price trend). Returns a short key: "<n>lb"/"<n>kg" for a
+ * per-weight price (n = the pound/kilogram count it's priced per, 1 if none
+ * is printed), "multi<n>" for a "n/$X" multi-buy, else "flat" (a plain
+ * per-item/package price).
+ */
+function priceBasis(priceText) {
+  const s = String(priceText || '').toLowerCase();
+  // "$5.99/3 lb", "/3kg" — an explicit weight count right after the slash.
+  let m = s.match(/\/\s*(\d+(?:\.\d+)?)\s*(lbs?|pounds?|kgs?|kilograms?)\b/);
+  if (m) {
+    return `${m[1]}${m[2].startsWith('k') ? 'kg' : 'lb'}`;
+  }
+  // "$3.17/lb", "$11.98 lb" — per a single lb/kg, no count printed.
+  m = s.match(/\b(lbs?|pounds?|kgs?|kilograms?)\b/);
+  if (m) {
+    return `1${m[1].startsWith('k') ? 'kg' : 'lb'}`;
+  }
+  // "2/$7", "3 for $4" — a multi-buy count.
+  m = s.match(/(\d+)\s*\/\s*\$|(\d+)\s*for\s*\$/);
+  if (m) {
+    return `multi${m[1] || m[2]}`;
+  }
+  return 'flat';
+}
+
+/**
  * Deal-quality / lowest-price / trend / retailer-compare / sale-frequency, all
  * derived from the same sighting history — one aggregate so the client and the
  * chat agent can each pull whichever field they need. Accepts one canonical
@@ -745,6 +775,10 @@ export function priceInsight(canonicalProductIdOrIds, {store} = {}) {
       lowestPrice,
     })),
     sightings: history.length,
+    // True when these sightings aren't all priced the same way (some per lb/
+    // kg, some flat, some a multi-buy) — the comparison above may not be
+    // apples-to-apples even though every priceValue is just a plain number.
+    mixedPriceUnits: new Set(priced.map(h => priceBasis(h.price))).size > 1,
   };
 }
 

@@ -468,18 +468,26 @@ function composePriceInsightReply(agent, insight) {
   // A single sighting is only ever today's own price — nothing to compare it
   // against, so never claim a deal quality / "lowest in N months" from it.
   const notEnoughHistory = insight.sightings < 2;
+  // Some flyer prices are per lb/kg, others flat per item, others a
+  // multi-buy count ("2/$7") — priceValue is just a plain number regardless,
+  // so a "trend" across mixed bases can look like a real swing when it's
+  // really just a different way of pricing the same product. Only appended
+  // to an actual numeric answer, never to a "not enough history yet" one.
+  const unitCaveat = insight.mixedPriceUnits
+    ? " Heads up: these flyer prices aren't all priced the same way (some per lb/kg, others per item or a multi-buy), so the comparison may not be exact."
+    : '';
 
   if (targetPrice) {
     if (notEnoughHistory) {
       return `I don't have enough price history on ${productHint} yet to judge $${targetPrice.toFixed(2)}.`;
     }
     if (targetPrice <= insight.min90d * 1.05) {
-      return `$${targetPrice.toFixed(2)} is a great price for ${productHint} — that matches its lowest price in the last 90 days (${fmt(insight.min90d)}).`;
+      return `$${targetPrice.toFixed(2)} is a great price for ${productHint} — that matches its lowest price in the last 90 days (${fmt(insight.min90d)}).${unitCaveat}`;
     }
     if (targetPrice <= insight.median90d) {
-      return `$${targetPrice.toFixed(2)} is a good price for ${productHint} — below its typical price of ${fmt(insight.median90d)} (lowest recently: ${fmt(insight.min90d)}).`;
+      return `$${targetPrice.toFixed(2)} is a good price for ${productHint} — below its typical price of ${fmt(insight.median90d)} (lowest recently: ${fmt(insight.min90d)}).${unitCaveat}`;
     }
-    return `$${targetPrice.toFixed(2)} isn't a great deal on ${productHint} — it's been as low as ${fmt(insight.min90d)}, typically around ${fmt(insight.median90d)}.`;
+    return `$${targetPrice.toFixed(2)} isn't a great deal on ${productHint} — it's been as low as ${fmt(insight.min90d)}, typically around ${fmt(insight.median90d)}.${unitCaveat}`;
   }
 
   switch (insightType) {
@@ -487,17 +495,19 @@ function composePriceInsightReply(agent, insight) {
       if (notEnoughHistory) {
         return `I've only seen ${productHint} once so far — not enough history yet to say.`;
       }
-      return insight.isLowestIn3Months
-        ? `Yes — ${fmt(insight.currentPrice)} is the lowest ${productHint} has been in at least 3 months.`
-        : `Not quite — ${productHint} is ${fmt(insight.currentPrice)} now; its lowest in the last 3 months was ${fmt(insight.min90d)}` +
-            (min90dWeek ? `, the week of ${min90dWeek}` : '') +
-            '.';
+      return (
+        (insight.isLowestIn3Months
+          ? `Yes — ${fmt(insight.currentPrice)} is the lowest ${productHint} has been in at least 3 months.`
+          : `Not quite — ${productHint} is ${fmt(insight.currentPrice)} now; its lowest in the last 3 months was ${fmt(insight.min90d)}` +
+              (min90dWeek ? `, the week of ${min90dWeek}` : '') +
+              '.') + unitCaveat
+      );
     case 'when_lowest': {
       if (notEnoughHistory || !min90dWeek) {
         return `I've only seen one price for ${productHint} so far (${fmt(insight.currentPrice)}) — not enough history to say when it was lowest.`;
       }
       const atStore = insight.min90dStore ? ` at ${insight.min90dStore}` : '';
-      return `${fmt(insight.min90d)}${atStore}, the week of ${min90dWeek} — that's the lowest ${productHint} has been recently.`;
+      return `${fmt(insight.min90d)}${atStore}, the week of ${min90dWeek} — that's the lowest ${productHint} has been recently.${unitCaveat}`;
     }
     case 'store_compare': {
       if (!insight.byStore.length) {
@@ -506,7 +516,7 @@ function composePriceInsightReply(agent, insight) {
       const cheapest = [...insight.byStore].sort(
         (a, b) => (a.latestPrice ?? Infinity) - (b.latestPrice ?? Infinity),
       )[0];
-      return `${cheapest.store} usually has the best price on ${productHint}, most recently ${fmt(cheapest.latestPrice)}.`;
+      return `${cheapest.store} usually has the best price on ${productHint}, most recently ${fmt(cheapest.latestPrice)}.${unitCaveat}`;
     }
     case 'sale_frequency':
       return insight.saleFrequencyDays
@@ -516,12 +526,12 @@ function composePriceInsightReply(agent, insight) {
       return (
         `${productHint} is ${fmt(insight.currentPrice)} now; it's ranged from ${fmt(insight.min90d)}` +
         (min90dWeek ? ` (the week of ${min90dWeek})` : '') +
-        ` to around ${fmt(insight.median90d)} in the last 90 days.`
+        ` to around ${fmt(insight.median90d)} in the last 90 days.${unitCaveat}`
       );
     case 'deal_quality':
     default:
       return insight.dealQuality
-        ? `${productHint} at ${fmt(insight.currentPrice)} looks like a ${insight.dealQuality} deal (recent low: ${fmt(insight.min90d)}, typical: ${fmt(insight.median90d)}).`
+        ? `${productHint} at ${fmt(insight.currentPrice)} looks like a ${insight.dealQuality} deal (recent low: ${fmt(insight.min90d)}, typical: ${fmt(insight.median90d)}).${unitCaveat}`
         : `I don't have enough price history on ${productHint} yet to judge.`;
   }
 }

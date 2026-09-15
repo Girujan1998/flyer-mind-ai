@@ -236,7 +236,38 @@ export type PriceInsight = {
     lowestPrice: number | null;
   }[];
   sightings: number;
+  /** True when these sightings aren't all priced the same way (some per
+   * lb/kg, some flat, some a multi-buy) — see `priceBasis` — so the
+   * comparison above may not be exact even though every price is a plain
+   * number. */
+  mixedPriceUnits: boolean;
 };
+
+/**
+ * How a flyer price is actually priced — "$3.17/lb", "$5.99/3 lb", "$4.99
+ * each", and "2/$7" are NOT directly comparable dollar figures. Returns
+ * "<n>lb"/"<n>kg" for a per-weight price (n = the lb/kg count it's priced
+ * per, 1 if none is printed), "multi<n>" for a "n/$X" multi-buy, else "flat"
+ * (a plain per-item/package price). Mirrors server/src/db.js `priceBasis` —
+ * used here to flag mixed units on the price-history strip without an extra
+ * network round trip (the history list this reads from is already fetched).
+ */
+export function priceBasis(priceText: string): string {
+  const s = priceText.toLowerCase();
+  let m = s.match(/\/\s*(\d+(?:\.\d+)?)\s*(lbs?|pounds?|kgs?|kilograms?)\b/);
+  if (m) {
+    return `${m[1]}${m[2].startsWith('k') ? 'kg' : 'lb'}`;
+  }
+  m = s.match(/\b(lbs?|pounds?|kgs?|kilograms?)\b/);
+  if (m) {
+    return `1${m[1].startsWith('k') ? 'kg' : 'lb'}`;
+  }
+  m = s.match(/(\d+)\s*\/\s*\$|(\d+)\s*for\s*\$/);
+  if (m) {
+    return `multi${m[1] ?? m[2]}`;
+  }
+  return 'flat';
+}
 
 /** Chronological price history for a canonical product, e.g. for a trend chart. */
 export function fetchPriceHistory(

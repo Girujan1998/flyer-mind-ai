@@ -21,6 +21,7 @@ import {
   fetchPriceInsight,
   flyerStatus,
   formatValidity,
+  priceBasis,
 } from '../api/extract';
 import {Palette, fonts, radius, spacing, useThemedStyles} from '../theme';
 import FlyerStatusPill from './FlyerStatusPill';
@@ -96,6 +97,13 @@ function PriceHistoryStrip({
     return null;
   }
 
+  // "$3.17/lb" and "$4.99 each" and "2/$7" aren't directly comparable dollar
+  // figures — flag it rather than let the list imply a price swing that's
+  // really just a different way of pricing the same product (e.g. carrots
+  // shown some weeks per lb, other weeks as a flat bag price).
+  const priced = history.filter(h => h.priceValue != null);
+  const mixedUnits = new Set(priced.map(h => priceBasis(h.price))).size > 1;
+
   return (
     <View style={styles.priceHistoryRow}>
       <Text style={styles.priceHistoryText}>
@@ -104,6 +112,12 @@ function PriceHistoryStrip({
         <Text style={styles.priceHistoryLabel}>{'  ·  Previous: '}</Text>
         {prior.map(h => h.price || `$${h.priceValue?.toFixed(2)}`).join(', ')}
       </Text>
+      {mixedUnits ? (
+        <Text style={styles.priceHistoryCaveat}>
+          Prices above aren't all priced the same way (some per lb/kg, others
+          per item or a multi-buy) — treat the comparison loosely.
+        </Text>
+      ) : null}
     </View>
   );
 }
@@ -369,9 +383,15 @@ const makeStyles = (c: Palette) =>
       letterSpacing: 0.3,
       color: c.text,
     },
-    priceHistoryRow: {marginTop: spacing.xs, minHeight: 16},
+    priceHistoryRow: {marginTop: spacing.xs, minHeight: 16, gap: 3},
     priceHistoryText: {color: c.textMuted, fontSize: 12, lineHeight: 17},
     priceHistoryLabel: {fontWeight: '700', color: c.text},
+    priceHistoryCaveat: {
+      color: c.textMuted,
+      fontSize: 11,
+      lineHeight: 15,
+      fontStyle: 'italic',
+    },
     backdrop: {
       flex: 1,
       backgroundColor: c.scrim,
