@@ -161,6 +161,12 @@ function ChatScreen(): React.JSX.Element {
   const [infoProduct, setInfoProduct] = useState<Product | null>(null);
   const [flyerProduct, setFlyerProduct] = useState<Product | null>(null);
   const [keyboardUp, setKeyboardUp] = useState(false);
+  /** Measured height of ScreenHeader — KeyboardAvoidingView sits below it, and
+   * on iOS needs that height as keyboardVerticalOffset or its "padding"
+   * behavior under-compensates by roughly the header's height, leaving the
+   * composer covered by the keyboard (only visible with the real on-screen
+   * keyboard — a simulator driven by the host keyboard never shows it). */
+  const [headerHeight, setHeaderHeight] = useState(0);
   /** Message ids whose "+ N more" list has been expanded. */
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
 
@@ -396,28 +402,31 @@ function ChatScreen(): React.JSX.Element {
 
   return (
     <View style={styles.container}>
-      <ScreenHeader
-        title="Chat"
-        action={
-          messages.length > 1 ? (
-            <Pressable
-              onPress={newChat}
-              accessibilityRole="button"
-              accessibilityLabel="Start a new chat"
-              hitSlop={8}
-              style={({pressed}) => [
-                styles.newChatBtn,
-                pressed && styles.pressed,
-              ]}>
-              <Text style={styles.newChatText}>New chat</Text>
-            </Pressable>
-          ) : undefined
-        }
-      />
+      <View onLayout={e => setHeaderHeight(e.nativeEvent.layout.height)}>
+        <ScreenHeader
+          title="Chat"
+          action={
+            messages.length > 1 ? (
+              <Pressable
+                onPress={newChat}
+                accessibilityRole="button"
+                accessibilityLabel="Start a new chat"
+                hitSlop={8}
+                style={({pressed}) => [
+                  styles.newChatBtn,
+                  pressed && styles.pressed,
+                ]}>
+                <Text style={styles.newChatText}>New chat</Text>
+              </Pressable>
+            ) : undefined
+          }
+        />
+      </View>
 
       <KeyboardAvoidingView
         style={styles.flex}
-        behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
+        behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+        keyboardVerticalOffset={Platform.OS === 'ios' ? headerHeight : 0}>
         <FlatList
           ref={listRef}
           data={messages}
