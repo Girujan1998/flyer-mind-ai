@@ -22,6 +22,7 @@ import {
   priceInsight,
   productCountForFlyer,
   resolveCanonicalId,
+  resolveCanonicalIds,
   saveExtraction,
   searchProducts,
   searchProductsExpanded,
@@ -452,9 +453,12 @@ app.post('/alerts', express.json({limit: '4kb'}), (req, res) => {
 function composePriceInsightReply(agent, insight) {
   const {productHint, insightType, targetPrice} = agent;
   const fmt = v => (v == null ? null : `$${v.toFixed(2)}`);
+  // A single sighting is only ever today's own price — nothing to compare it
+  // against, so never claim a deal quality / "lowest in N months" from it.
+  const notEnoughHistory = insight.sightings < 2;
 
   if (targetPrice) {
-    if (insight.min90d == null) {
+    if (notEnoughHistory) {
       return `I don't have enough price history on ${productHint} yet to judge $${targetPrice.toFixed(2)}.`;
     }
     if (targetPrice <= insight.min90d * 1.05) {
@@ -468,6 +472,9 @@ function composePriceInsightReply(agent, insight) {
 
   switch (insightType) {
     case 'lowest_price':
+      if (notEnoughHistory) {
+        return `I've only seen ${productHint} once so far — not enough history yet to say.`;
+      }
       return insight.isLowestIn3Months
         ? `Yes — ${fmt(insight.currentPrice)} is the lowest ${productHint} has been in at least 3 months.`
         : `Not quite — ${productHint} is ${fmt(insight.currentPrice)} now; its lowest in the last 3 months was ${fmt(insight.min90d)}.`;
@@ -536,8 +543,14 @@ app.post('/chat', express.json({limit: '32kb'}), async (req, res) => {
     }
 
     if (agent.kind === 'price_insight') {
-      const canonicalId = resolveCanonicalId(agent.productHint);
-      const insight = canonicalId ? priceInsight(canonicalId) : null;
+      // "tomatoes" pools every variety (field/grape/roma/...) into one
+      // answer; only an explicit "products WITH tomatoes" ask (scope
+      // "broad") also pulls in something that merely lists it as an
+      // ingredient, e.g. a pasta sauce.
+      const canonicalIds = resolveCanonicalIds(agent.productHint, {
+        broad: agent.scope === 'broad',
+      });
+      const insight = canonicalIds.length ? priceInsight(canonicalIds) : null;
       const reply = insight
         ? composePriceInsightReply(agent, insight)
         : `I don't have enough price history for "${agent.productHint}" yet — it needs to show up in a couple of flyers first.`;

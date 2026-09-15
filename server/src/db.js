@@ -596,12 +596,20 @@ function median(nums) {
 }
 
 /**
- * Chronological price sightings for one canonical product, optionally
- * narrowed to one store or the last `months` months.
+ * Chronological price sightings for one canonical product — or, given an
+ * array, pooled across several (used to answer a generic ask like "tomatoes"
+ * over every tomato variety at once rather than one arbitrary one) —
+ * optionally narrowed to one store or the last `months` months.
  */
-export function priceHistory(canonicalProductId, {store, months} = {}) {
-  const conds = ['p.canonical_product_id = ?'];
-  const params = [canonicalProductId];
+export function priceHistory(canonicalProductIdOrIds, {store, months} = {}) {
+  const ids = Array.isArray(canonicalProductIdOrIds)
+    ? canonicalProductIdOrIds
+    : [canonicalProductIdOrIds];
+  if (!ids.length) {
+    return [];
+  }
+  const conds = [`p.canonical_product_id IN (${ids.map(() => '?').join(',')})`];
+  const params = [...ids];
   if (store) {
     conds.push('f.store = ?');
     params.push(store);
@@ -636,11 +644,12 @@ export function priceHistory(canonicalProductId, {store, months} = {}) {
 /**
  * Deal-quality / lowest-price / trend / retailer-compare / sale-frequency, all
  * derived from the same sighting history — one aggregate so the client and the
- * chat agent can each pull whichever field they need. Returns `null` when
- * there's no history at all for this canonical product.
+ * chat agent can each pull whichever field they need. Accepts one canonical
+ * product id or (to answer a generic ask across several varieties) an array.
+ * Returns `null` when there's no history at all.
  */
-export function priceInsight(canonicalProductId, {store} = {}) {
-  const history = priceHistory(canonicalProductId, {store});
+export function priceInsight(canonicalProductIdOrIds, {store} = {}) {
+  const history = priceHistory(canonicalProductIdOrIds, {store});
   const priced = history.filter(h => h.priceValue != null);
   if (!priced.length) {
     return null;
@@ -653,21 +662,32 @@ export function priceInsight(canonicalProductId, {store} = {}) {
   const min90d = Math.min(...pool);
   const median90d = median(pool);
 
+  // A single sighting is only ever "today's own price" — with nothing else to
+  // compare it against, don't claim a deal quality at all (it would otherwise
+  // always compute as "great", since a lone price trivially equals its own
+  // min/median).
   let dealQuality = null;
-  if (current.priceValue <= min90d * 1.05) {
-    dealQuality = 'great';
-  } else if (current.priceValue <= median90d) {
-    dealQuality = 'good';
-  } else if (current.priceValue <= median90d * 1.15) {
-    dealQuality = 'average';
-  } else {
-    dealQuality = 'poor';
+  if (priced.length >= 2) {
+    if (current.priceValue <= min90d * 1.05) {
+      dealQuality = 'great';
+    } else if (current.priceValue <= median90d) {
+      dealQuality = 'good';
+    } else if (current.priceValue <= median90d * 1.15) {
+      dealQuality = 'average';
+    } else {
+      dealQuality = 'poor';
+    }
   }
 
   const isLowestInMonths = months => {
     const cutoff = daysAgoIso(Math.round(months * 30.44));
     const inWindow = priced.filter(h => !h.validFrom || h.validFrom >= cutoff);
-    return inWindow.length > 0 && current.priceValue <= Math.min(...inWindow.map(h => h.priceValue));
+    // Same reasoning as dealQuality — need at least one OTHER sighting in the
+    // window, or "lowest in N months" is trivially true of the only price.
+    return (
+      inWindow.length >= 2 &&
+      current.priceValue <= Math.min(...inWindow.map(h => h.priceValue))
+    );
   };
 
   const saleDates = [...new Set(priced.filter(h => h.onSale && h.validFrom).map(h => h.validFrom))].sort();
@@ -717,37 +737,91 @@ export function priceInsight(canonicalProductId, {store} = {}) {
 }
 
 /**
- * Resolve a loose product hint ("strawberries", "chicken breast") to a
- * canonical product id — first against canonical products directly, then
- * (for anything not yet linked by the matching pass) against any product row
- * that already carries a canonical id. Returns `null` if nothing matches.
+ * Resolve a loose product hint ("tomatoes", "chicken breast") to the
+ * canonical product(s) it names, most-sighted first.
+ *
+ * A generic ask means the actual item — never something that merely mentions
+ * it as an ingredient. So the primary tier only ever matches on real product
+ * identity: a canonical group's own name ending in the hint ("tomatoes" ->
+ * "field tomatoes", "grape tomatoes", ... — ALL of them, so priceInsight can
+ * pool every variety into one "tomatoes in general" answer instead of an
+ * arbitrary pick), or — for a group filed under a different name (e.g. "roma
+ * tomatoes" grouped as "roma tomatoes green sweet") — a linked product's own
+ * category/name.
+ *
+ * `broad: true` (an explicit "products WITH tomatoes" / ingredient-style ask)
+ * additionally unions in anything carrying the hint as a complete TAG, so a
+ * pasta sauce that lists tomatoes as one ingredient can be included too —
+ * added on top of the real-item matches, never in place of them, and never
+ * for a plain generic ask.
+ *
+ * Returns `[]` if nothing matches.
  */
-export function resolveCanonicalId(hint) {
+export function resolveCanonicalIds(hint, {broad = false} = {}) {
   const h = String(hint || '').trim().toLowerCase();
   if (!h) {
-    return null;
+    return [];
   }
-  let row = db
+
+  const byNameHead = db
     .prepare(
-      `SELECT id FROM canonical_products
-        WHERE headmatch(lower(canonical_name), ?) OR tagexact(coalesce(tags,''), ?)
-        LIMIT 1`,
+      `SELECT cp.id, COUNT(p.id) AS n
+         FROM canonical_products cp
+         LEFT JOIN products p ON p.canonical_product_id = cp.id
+        WHERE headmatch(lower(cp.canonical_name), ?)
+        GROUP BY cp.id
+        ORDER BY n DESC`,
     )
-    .get(h, h);
-  if (row) {
-    return row.id;
+    .all(h);
+
+  const itemIds = byNameHead.length
+    ? byNameHead.map(r => r.id)
+    : db
+        .prepare(
+          `SELECT p.canonical_product_id AS id, COUNT(*) AS n
+             FROM products p
+            WHERE p.canonical_product_id IS NOT NULL
+              AND (headmatch(lower(coalesce(p.category,'')), ?)
+                   OR wordmatch(lower(coalesce(p.name,'') || ' ' || coalesce(p.info,'')), ?))
+            GROUP BY p.canonical_product_id
+            ORDER BY n DESC`,
+        )
+        .all(h, h)
+        .map(r => r.id);
+
+  if (!broad) {
+    return itemIds;
   }
-  row = db
+
+  const byTag = db
     .prepare(
-      `SELECT canonical_product_id AS id FROM products
-        WHERE canonical_product_id IS NOT NULL
-          AND (headmatch(lower(coalesce(category,'')), ?)
-               OR tagexact(coalesce(tags,''), ?)
-               OR wordmatch(lower(coalesce(name,'') || ' ' || coalesce(info,'')), ?))
-        LIMIT 1`,
+      `SELECT cp.id, COUNT(p.id) AS n
+         FROM canonical_products cp
+         LEFT JOIN products p ON p.canonical_product_id = cp.id
+        WHERE tagexact(coalesce(cp.tags,''), ?)
+        GROUP BY cp.id
+        ORDER BY n DESC`,
     )
-    .get(h, h, h);
-  return row ? row.id : null;
+    .all(h)
+    .map(r => r.id);
+  const byProductTag = db
+    .prepare(
+      `SELECT p.canonical_product_id AS id, COUNT(*) AS n
+         FROM products p
+        WHERE p.canonical_product_id IS NOT NULL AND tagexact(coalesce(p.tags,''), ?)
+        GROUP BY p.canonical_product_id
+        ORDER BY n DESC`,
+    )
+    .all(h)
+    .map(r => r.id);
+
+  return [...new Set([...itemIds, ...byTag, ...byProductTag])];
+}
+
+/** The single best canonical product for a hint (item-scope only) — for a
+ * context like a price alert that needs exactly one target. */
+export function resolveCanonicalId(hint) {
+  return resolveCanonicalIds(hint, {broad: false})[0] ?? null;
 }
 
 // ---------------------------------------------------------------------------
@@ -834,12 +908,13 @@ const STATUS_CASE = `CASE
   ELSE 'valid'
 END`;
 
-// Sort key for the default (unfiltered) list: active/undated first, then
-// upcoming, then expired at the bottom. Same two `?` binds as STATUS_CASE.
+// Sort key for the default (unfiltered) list: upcoming first (it's the newest
+// news — a flyer about to start), then active/undated, then expired at the
+// bottom. Same two `?` binds as STATUS_CASE.
 const STATUS_RANK = `CASE ${STATUS_CASE}
-  WHEN 'upcoming' THEN 1
+  WHEN 'upcoming' THEN 0
   WHEN 'expired'  THEN 2
-  ELSE 0
+  ELSE 1
 END`;
 
 const toList = v =>

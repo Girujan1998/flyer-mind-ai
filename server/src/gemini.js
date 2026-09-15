@@ -1124,6 +1124,12 @@ If the user asks whether a price is good, how a price compares to before, the
 lowest it's been, which store is cheapest, or how often something goes on
 sale — use action "price_insight":
 - "productHint": the plain item, 1-4 words, no brand ("strawberries", "chicken breast").
+- "scope": "item" (default — almost always this) means the actual product —
+  "tomatoes" means the produce itself, pooling every variety, never something
+  that merely contains it as an ingredient. "broad" ONLY for an explicit
+  ingredient-style ask — "what products have tomatoes in them", "anything
+  with peanuts" — where a pasta sauce or a snack listing it as an ingredient
+  should also count.
 - "insightType": "deal_quality" (is a price good — incl. "is $X a good price"), "lowest_price" (is this the lowest it's been recently), "trend" (how has it changed), "store_compare" (which store is cheapest), or "sale_frequency" (how often it goes on sale). Pick the closest one.
 - "targetPrice": the dollar amount they mentioned as a NUMBER (e.g. "$3.99" -> 3.99). 0 if none mentioned.
 
@@ -1209,7 +1215,7 @@ function cleanTerms(value) {
  *   Trimmed recent history, ending with the new user turn.
  * @returns {Promise<
  *   | { kind: 'search', terms: string[], scope: 'item'|'broad', must: string[], intent: string, usage: object }
- *   | { kind: 'price_insight', productHint: string, insightType: string, targetPrice: number|null, usage: object }
+ *   | { kind: 'price_insight', productHint: string, scope: 'item'|'broad', insightType: string, targetPrice: number|null, usage: object }
  *   | { kind: 'set_alert', productHint: string, targetPrice: number, comparison: 'lt'|'lte', usage: object }
  *   | { kind: 'reply', text: string, usage: object }
  * >}
@@ -1290,6 +1296,7 @@ export async function chatAgent(messages) {
     result = {
       kind: 'price_insight',
       productHint,
+      scope,
       insightType: INSIGHT_TYPES.includes(parsed.insightType)
         ? parsed.insightType
         : 'deal_quality',
@@ -1317,7 +1324,7 @@ export async function chatAgent(messages) {
       ? `  ${result.scope}  [${result.terms.join(', ')}]` +
         (result.must.length ? `  must:[${result.must.join(', ')}]` : '')
       : result.kind === 'price_insight'
-      ? `  ${result.insightType}  "${result.productHint}"` +
+      ? `  ${result.scope}  ${result.insightType}  "${result.productHint}"` +
         (result.targetPrice ? `  $${result.targetPrice}` : '')
       : result.kind === 'set_alert'
       ? `  "${result.productHint}" ${result.comparison} $${result.targetPrice}`
@@ -1337,7 +1344,7 @@ export async function chatAgent(messages) {
     model,
     turns: messages.length,
     kind: result.kind,
-    scope: result.kind === 'search' ? result.scope : undefined,
+    scope: result.kind === 'search' || result.kind === 'price_insight' ? result.scope : undefined,
     terms: result.kind === 'search' ? result.terms : [],
     must: result.kind === 'search' ? result.must : [],
     productHint: result.productHint,
