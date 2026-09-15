@@ -936,6 +936,16 @@ function titleCaseName(name) {
 
 export const STATUSES = ['valid', 'upcoming', 'expired', 'unknown'];
 
+// When the caller hasn't explicitly chosen statuses, the search tab should
+// default to hiding expired flyers rather than showing everything.
+const DEFAULT_VISIBLE_STATUSES = STATUSES.filter(s => s !== 'expired');
+
+/** `statuses` as given, or the default "everything but expired" when empty. */
+function effectiveStatuses(statuses) {
+  const stz = toList(statuses).filter(s => STATUSES.includes(s));
+  return stz.length ? stz : DEFAULT_VISIBLE_STATUSES;
+}
+
 /** Local "YYYY-MM-DD" — compared string-wise against the flyer date columns. */
 function todayIso() {
   const d = new Date();
@@ -1169,7 +1179,7 @@ export function searchProducts(
   const today = todayIso();
 
   const {clause, params, query} = buildWhere(
-    {q, departments, stores, statuses, onSale},
+    {q, departments, stores, statuses: effectiveStatuses(statuses), onSale},
     today,
   );
 
@@ -1200,7 +1210,7 @@ export function searchProducts(
 
   // Plain browse and a bare aisle browse rank by flyer status (expired sinks);
   // a scored query ranks by relevance; anything else stays newest-first.
-  const plain = clause === '';
+  const plain = query.mode === 'empty';
   let orderBy;
   let orderParams;
   if (scored) {
@@ -1392,9 +1402,10 @@ export function filterFacets({
 } = {}) {
   const today = todayIso();
   const FROM = 'FROM products p JOIN flyers f ON f.id = p.flyer_id';
+  const effStatuses = effectiveStatuses(statuses);
 
   // departments list — every filter except departments
-  const dw = buildWhere({q, stores, statuses, onSale}, today);
+  const dw = buildWhere({q, stores, statuses: effStatuses, onSale}, today);
   const deptRows = db
     .prepare(
       `SELECT p.department AS value, COUNT(*) AS n ${FROM}
@@ -1404,7 +1415,7 @@ export function filterFacets({
     .all(...dw.params);
 
   // stores list — every filter except stores
-  const sw = buildWhere({q, departments, statuses, onSale}, today);
+  const sw = buildWhere({q, departments, statuses: effStatuses, onSale}, today);
   const storeRows = db
     .prepare(
       `SELECT f.store AS value, COUNT(*) AS n ${FROM}
@@ -1426,7 +1437,7 @@ export function filterFacets({
   );
 
   // on-sale count — every filter except onSale itself
-  const ow = buildWhere({q, departments, stores, statuses}, today);
+  const ow = buildWhere({q, departments, stores, statuses: effStatuses}, today);
   const saleCount = db
     .prepare(
       `SELECT COUNT(*) AS n ${FROM} ${andWhere(ow.clause, 'p.on_sale = 1')}`,
@@ -1434,7 +1445,10 @@ export function filterFacets({
     .get(...ow.params).n;
 
   // total — the whole selection
-  const all = buildWhere({q, departments, stores, statuses, onSale}, today);
+  const all = buildWhere(
+    {q, departments, stores, statuses: effStatuses, onSale},
+    today,
+  );
   const total = db
     .prepare(`SELECT COUNT(*) AS n ${FROM} ${all.clause}`)
     .get(...all.params).n;

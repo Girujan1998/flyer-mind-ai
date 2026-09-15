@@ -161,7 +161,9 @@ function FilterModal({
           </View>
 
           <Text style={styles.hint}>
-            Leave a section untouched to include everything in it.
+            Leave a section untouched to include everything in it — except
+            expired flyers, which are hidden by default. Select Expired below to
+            show them.
           </Text>
 
           <ScrollView
