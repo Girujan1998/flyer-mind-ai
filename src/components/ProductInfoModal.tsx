@@ -1,5 +1,6 @@
-import React from 'react';
+import React, {useEffect, useState} from 'react';
 import {
+  ActivityIndicator,
   Dimensions,
   Image,
   Modal,
@@ -11,14 +12,148 @@ import {
 } from 'react-native';
 
 import {
+  DealQuality,
   FlyerPage,
+  PriceHistoryEntry,
   Product,
   boxToRect,
+  fetchPriceHistory,
+  fetchPriceInsight,
   flyerStatus,
   formatValidity,
 } from '../api/extract';
 import {Palette, fonts, radius, spacing, useThemedStyles} from '../theme';
 import FlyerStatusPill from './FlyerStatusPill';
+
+const DEAL_LABEL: Record<DealQuality, string> = {
+  great: 'Great price',
+  good: 'Good price',
+  average: 'Typical price',
+  poor: 'Above typical',
+};
+
+/**
+ * Up to the 4 most recent flyer prices for this product (excluding today's,
+ * which the caller already shows), newest first, deduped so a re-listed price
+ * doesn't repeat back-to-back.
+ */
+function priorPrices(history: PriceHistoryEntry[]): PriceHistoryEntry[] {
+  const withPrice = history.filter(h => h.priceValue != null);
+  const rest = withPrice.slice(0, -1).reverse();
+  const out: PriceHistoryEntry[] = [];
+  for (const h of rest) {
+    if (out[out.length - 1]?.priceValue !== h.priceValue) {
+      out.push(h);
+    }
+    if (out.length >= 4) {
+      break;
+    }
+  }
+  return out;
+}
+
+/** "Today: $4.99 · Previous: $5.49, $4.49, $5.99" — from real flyer history. */
+function PriceHistoryStrip({
+  canonicalProductId,
+  currentPrice,
+  styles,
+}: {
+  canonicalProductId: string;
+  currentPrice: string;
+  styles: ReturnType<typeof makeStyles>;
+}): React.JSX.Element | null {
+  const [history, setHistory] = useState<PriceHistoryEntry[] | null>(null);
+
+  useEffect(() => {
+    let live = true;
+    setHistory(null);
+    fetchPriceHistory(canonicalProductId, {months: 6})
+      .then(res => {
+        if (live) {
+          setHistory(res.history);
+        }
+      })
+      .catch(() => {
+        if (live) {
+          setHistory([]);
+        }
+      });
+    return () => {
+      live = false;
+    };
+  }, [canonicalProductId]);
+
+  if (history === null) {
+    return (
+      <View style={styles.priceHistoryRow}>
+        <ActivityIndicator size="small" />
+      </View>
+    );
+  }
+
+  const prior = priorPrices(history);
+  if (!prior.length) {
+    return null;
+  }
+
+  return (
+    <View style={styles.priceHistoryRow}>
+      <Text style={styles.priceHistoryText}>
+        <Text style={styles.priceHistoryLabel}>Today: </Text>
+        {currentPrice || '—'}
+        <Text style={styles.priceHistoryLabel}>{'  ·  Previous: '}</Text>
+        {prior.map(h => h.price || `$${h.priceValue?.toFixed(2)}`).join(', ')}
+      </Text>
+    </View>
+  );
+}
+
+/** A small "Great price" / "Good price" / … pill, from real trailing-window data. */
+function DealQualityBadge({
+  canonicalProductId,
+  styles,
+}: {
+  canonicalProductId: string;
+  styles: ReturnType<typeof makeStyles>;
+}): React.JSX.Element | null {
+  const [quality, setQuality] = useState<DealQuality | null | undefined>(
+    undefined,
+  );
+
+  useEffect(() => {
+    let live = true;
+    setQuality(undefined);
+    fetchPriceInsight(canonicalProductId)
+      .then(insight => {
+        if (live) {
+          setQuality(insight.dealQuality);
+        }
+      })
+      .catch(() => {
+        if (live) {
+          setQuality(null);
+        }
+      });
+    return () => {
+      live = false;
+    };
+  }, [canonicalProductId]);
+
+  if (!quality) {
+    return null;
+  }
+  const toneStyle = {
+    great: styles.dealBadgeGreat,
+    good: styles.dealBadgeGood,
+    average: styles.dealBadgeAverage,
+    poor: styles.dealBadgePoor,
+  }[quality];
+  return (
+    <View style={[styles.dealBadge, toneStyle]}>
+      <Text style={styles.dealBadgeText}>{DEAL_LABEL[quality]}</Text>
+    </View>
+  );
+}
 
 const HERO_HEIGHT = 200;
 
@@ -151,12 +286,25 @@ function ProductInfoModal({
                       <Text style={styles.saleText}>SALE</Text>
                     </View>
                   ) : null}
+                  {product.canonicalProductId ? (
+                    <DealQualityBadge
+                      canonicalProductId={product.canonicalProductId}
+                      styles={styles}
+                    />
+                  ) : null}
                 </View>
                 {product.promoText ? (
                   <Text style={styles.promo}>{product.promoText}</Text>
                 ) : null}
                 {product.info ? (
                   <Text style={styles.details}>{product.info}</Text>
+                ) : null}
+                {product.canonicalProductId ? (
+                  <PriceHistoryStrip
+                    canonicalProductId={product.canonicalProductId}
+                    currentPrice={product.price}
+                    styles={styles}
+                  />
                 ) : null}
 
                 <View style={styles.meta}>
@@ -206,6 +354,24 @@ function ProductInfoModal({
 
 const makeStyles = (c: Palette) =>
   StyleSheet.create({
+    dealBadge: {
+      paddingVertical: 3,
+      paddingHorizontal: 9,
+      borderRadius: 999,
+    },
+    dealBadgeGreat: {backgroundColor: c.statusLive},
+    dealBadgeGood: {backgroundColor: c.primaryTint},
+    dealBadgeAverage: {backgroundColor: c.surfaceAlt},
+    dealBadgePoor: {backgroundColor: c.dealTint},
+    dealBadgeText: {
+      fontSize: 11,
+      fontWeight: '800',
+      letterSpacing: 0.3,
+      color: c.text,
+    },
+    priceHistoryRow: {marginTop: spacing.xs, minHeight: 16},
+    priceHistoryText: {color: c.textMuted, fontSize: 12, lineHeight: 17},
+    priceHistoryLabel: {fontWeight: '700', color: c.text},
     backdrop: {
       flex: 1,
       backgroundColor: c.scrim,

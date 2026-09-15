@@ -1,3 +1,5 @@
+import AsyncStorage from '@react-native-async-storage/async-storage';
+
 import {API_BASE_URL} from '../config';
 
 export type SelectedPdf = {
@@ -44,6 +46,10 @@ export type Product = {
   validFrom: string;
   /** Last day the flyer prices are in effect, "YYYY-MM-DD"; '' if unknown. */
   validTo: string;
+  /** The cross-flyer "same real-world product" group this sighting belongs to; null until the matching pass links it. */
+  canonicalProductId: string | null;
+  /** Display name of that group, e.g. "strawberries"; '' if not linked yet. */
+  canonicalName: string;
 };
 
 export type FlyerPage = {
@@ -67,6 +73,36 @@ export class AbortedError extends Error {
     super('Cancelled');
     this.name = 'AbortedError';
   }
+}
+
+const USER_ID_KEY = 'flyerMindAI.userId';
+let cachedUserId: string | null = null;
+
+// RFC-4122-*shaped* v4 id (Math.random, not crypto-grade) — good enough for
+// an anonymous per-install identity to hang price alerts off of; Hermes on
+// this RN version has no built-in crypto.randomUUID.
+function randomId(): string {
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
+    const r = Math.floor(Math.random() * 16);
+    const v = c === 'x' ? r : (r % 4) + 8;
+    return v.toString(16);
+  });
+}
+
+/** This install's anonymous id — generated once, persisted, reused after. */
+export async function getUserId(): Promise<string> {
+  if (cachedUserId) {
+    return cachedUserId;
+  }
+  const stored = await AsyncStorage.getItem(USER_ID_KEY).catch(() => null);
+  if (stored) {
+    cachedUserId = stored;
+    return stored;
+  }
+  const id = randomId();
+  await AsyncStorage.setItem(USER_ID_KEY, id).catch(() => {});
+  cachedUserId = id;
+  return id;
 }
 
 async function api<T>(path: string, init?: RequestInit): Promise<T> {
@@ -141,23 +177,119 @@ export type ChatResponse = {
   terms: string[];
   /** Restriction words a follow-up added (e.g. child / gluten free); [] if none. */
   must: string[];
+  /** Present only for a price-question reply — the numbers behind it. */
+  priceInsight?: PriceInsight | null;
 };
 
 /**
  * Ask the Chat-tab agent. The server runs one Gemini call to turn the latest
- * user turn into either a product search (expanded with synonyms / brand names)
- * or a short reply. `messages` should be a trimmed recent history ending with
- * the new user turn.
+ * user turn into a product search, a price question, a new price alert, or a
+ * short reply. `messages` should be a trimmed recent history ending with the
+ * new user turn. Sends this install's anonymous id so "set_alert" turns have
+ * somewhere to save the alert.
  */
-export function sendChat(
+export async function sendChat(
   messages: ChatTurn[],
   signal?: AbortSignal,
 ): Promise<ChatResponse> {
+  const userId = await getUserId();
   return api<ChatResponse>('/chat', {
     method: 'POST',
-    headers: {'Content-Type': 'application/json'},
+    headers: {'Content-Type': 'application/json', 'X-User-Id': userId},
     body: JSON.stringify({messages}),
     signal,
+  });
+}
+
+/** One flyer's price sighting of a canonical product, oldest first. */
+export type PriceHistoryEntry = {
+  price: string;
+  priceValue: number | null;
+  onSale: boolean;
+  store: string;
+  validFrom: string;
+  validTo: string;
+  flyerId: string;
+  page: number;
+};
+
+export type DealQuality = 'great' | 'good' | 'average' | 'poor';
+
+export type PriceInsight = {
+  currentPrice: number | null;
+  min90d: number | null;
+  median90d: number | null;
+  isLowestIn3Months: boolean;
+  isLowestIn6Months: boolean;
+  isLowestIn12Months: boolean;
+  dealQuality: DealQuality | null;
+  /** Roughly how often (in days) it's gone on sale recently; null if not enough history. */
+  saleFrequencyDays: number | null;
+  byStore: {
+    store: string;
+    latestPrice: number | null;
+    lowestPrice: number | null;
+  }[];
+  sightings: number;
+};
+
+/** Chronological price history for a canonical product, e.g. for a trend chart. */
+export function fetchPriceHistory(
+  canonicalProductId: string,
+  opts: {store?: string; months?: number} = {},
+): Promise<{history: PriceHistoryEntry[]}> {
+  const qs = [
+    opts.store ? `store=${encodeURIComponent(opts.store)}` : '',
+    opts.months ? `months=${opts.months}` : '',
+  ]
+    .filter(Boolean)
+    .join('&');
+  return api(
+    `/price-history/${encodeURIComponent(canonicalProductId)}${
+      qs ? `?${qs}` : ''
+    }`,
+  );
+}
+
+/** Deal-quality / lowest-price / retailer-comparison / sale-frequency, one call. */
+export function fetchPriceInsight(
+  canonicalProductId: string,
+  opts: {store?: string} = {},
+): Promise<PriceInsight> {
+  const qs = opts.store ? `?store=${encodeURIComponent(opts.store)}` : '';
+  return api(`/price-insight/${encodeURIComponent(canonicalProductId)}${qs}`);
+}
+
+export type PriceAlert = {
+  id: string;
+  canonicalProductId: string;
+  canonicalName: string;
+  targetPrice: number;
+  comparison: 'lt' | 'lte';
+  store: string;
+  createdAt: string;
+  resolvedAt: string | null;
+  resolvedProductId: string | null;
+};
+
+/** This device's price alerts, open ones first. */
+export async function fetchAlerts(): Promise<{alerts: PriceAlert[]}> {
+  const userId = await getUserId();
+  return api('/alerts', {headers: {'X-User-Id': userId}});
+}
+
+/** Create a price alert on a canonical product for this device. */
+export async function createAlert(input: {
+  canonicalProductId: string;
+  targetPrice: number;
+  comparison?: 'lt' | 'lte';
+  store?: string;
+}): Promise<{id: string}> {
+  const userId = await getUserId();
+  return api('/alerts', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json', 'X-User-Id': userId},
+    body: JSON.stringify(input),
   });
 }
 

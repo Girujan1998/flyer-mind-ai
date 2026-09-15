@@ -125,6 +125,42 @@ db.exec(`
   );
   CREATE INDEX IF NOT EXISTS idx_products_created ON products(created_at DESC);
   CREATE INDEX IF NOT EXISTS idx_products_department ON products(department);
+  CREATE INDEX IF NOT EXISTS idx_flyers_valid ON flyers(valid_from, valid_to);
+
+  -- A "canonical product" is the real-world item (e.g. "strawberries") that
+  -- many products rows — one per flyer sighting, possibly with a different
+  -- category string each time — get linked to via products.canonical_product_id.
+  -- This is what makes price history / trends / deal-quality possible: those
+  -- features group sightings by canonical product, not by raw category text.
+  CREATE TABLE IF NOT EXISTS canonical_products (
+    id             TEXT PRIMARY KEY,
+    canonical_name TEXT NOT NULL,
+    category       TEXT,
+    department     TEXT,
+    tags           TEXT,
+    created_at     TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_canonical_department ON canonical_products(department);
+
+  -- Anonymous per-install identity (no login) — just enough to own alerts.
+  CREATE TABLE IF NOT EXISTS users (
+    id         TEXT PRIMARY KEY,
+    created_at TEXT NOT NULL
+  );
+
+  CREATE TABLE IF NOT EXISTS price_alerts (
+    id                   TEXT PRIMARY KEY,
+    user_id              TEXT NOT NULL REFERENCES users(id),
+    canonical_product_id TEXT NOT NULL REFERENCES canonical_products(id),
+    target_price         REAL NOT NULL,
+    comparison           TEXT NOT NULL DEFAULT 'lte',
+    store                TEXT,
+    created_at           TEXT NOT NULL,
+    resolved_at          TEXT,
+    resolved_product_id  TEXT
+  );
+  CREATE INDEX IF NOT EXISTS idx_alerts_canonical ON price_alerts(canonical_product_id);
+  CREATE INDEX IF NOT EXISTS idx_alerts_user ON price_alerts(user_id);
 `);
 
 // Backfill columns onto a database created before they existed.
@@ -139,6 +175,7 @@ for (const [table, col] of [
   ['products', 'was_price TEXT'],
   ['products', 'promo_text TEXT'],
   ['products', 'on_sale INTEGER NOT NULL DEFAULT 0'],
+  ['products', 'canonical_product_id TEXT REFERENCES canonical_products(id)'],
 ]) {
   try {
     db.exec(`ALTER TABLE ${table} ADD COLUMN ${col}`);
@@ -146,6 +183,11 @@ for (const [table, col] of [
     // already there
   }
 }
+
+// Only safe to create once the ALTER above has run on an old DB.
+db.exec(
+  'CREATE INDEX IF NOT EXISTS idx_products_canonical ON products(canonical_product_id)',
+);
 
 const stmts = {
   flyerByHash: db.prepare('SELECT * FROM flyers WHERE hash = ?'),
@@ -204,6 +246,66 @@ const stmts = {
   countProducts: db.prepare('SELECT COUNT(*) AS n FROM products'),
   productsForFlyer: db.prepare(
     'SELECT COUNT(*) AS n FROM products WHERE flyer_id = ?',
+  ),
+
+  // --- canonical products (cross-flyer product identity) -------------------
+  missingCanonical: db.prepare(
+    `SELECT p.id, p.name, p.info, p.category, p.tags, p.department,
+            p.price_value, f.store
+       FROM products p JOIN flyers f ON f.id = p.flyer_id
+      WHERE p.canonical_product_id IS NULL
+        AND p.category IS NOT NULL AND p.category <> ''
+        AND p.department IS NOT NULL AND p.department <> ''
+      ORDER BY p.rowid
+      LIMIT ?`,
+  ),
+  insertCanonicalProduct: db.prepare(
+    `INSERT INTO canonical_products (id, canonical_name, category, department, tags, created_at)
+     VALUES (@id, @canonical_name, @category, @department, @tags, @created_at)`,
+  ),
+  updateProductCanonical: db.prepare(
+    'UPDATE products SET canonical_product_id = @canonical_product_id WHERE id = @id',
+  ),
+  canonicalExactCategory: db.prepare(
+    `SELECT id, canonical_name, category FROM canonical_products
+      WHERE department = @department AND lower(canonical_name) = @category
+      LIMIT 5`,
+  ),
+  canonicalHeadMatch: db.prepare(
+    `SELECT id, canonical_name, category FROM canonical_products
+      WHERE department = @department AND headmatch(lower(canonical_name), @needle)
+      LIMIT 5`,
+  ),
+  canonicalTagMatch: db.prepare(
+    `SELECT id, canonical_name, category FROM canonical_products
+      WHERE department = @department AND tagexact(coalesce(tags,''), @needle)
+      LIMIT 5`,
+  ),
+
+  // --- users / alerts --------------------------------------------------------
+  insertUserIgnore: db.prepare(
+    'INSERT OR IGNORE INTO users (id, created_at) VALUES (@id, @created_at)',
+  ),
+  insertAlert: db.prepare(
+    `INSERT INTO price_alerts
+       (id, user_id, canonical_product_id, target_price, comparison, store, created_at)
+     VALUES
+       (@id, @user_id, @canonical_product_id, @target_price, @comparison, @store, @created_at)`,
+  ),
+  listAlertsByUser: db.prepare(
+    `SELECT a.id, a.canonical_product_id, cp.canonical_name, a.target_price,
+            a.comparison, a.store, a.created_at, a.resolved_at, a.resolved_product_id
+       FROM price_alerts a JOIN canonical_products cp ON cp.id = a.canonical_product_id
+      WHERE a.user_id = @user_id
+      ORDER BY (a.resolved_at IS NOT NULL), a.created_at DESC`,
+  ),
+  openAlertsForCanonical: db.prepare(
+    `SELECT id, target_price, comparison, store FROM price_alerts
+      WHERE canonical_product_id = @canonical_product_id AND resolved_at IS NULL`,
+  ),
+  resolveAlert: db.prepare(
+    `UPDATE price_alerts SET resolved_at = @resolved_at, resolved_product_id = @resolved_product_id
+      WHERE id = @id`,
   ),
 };
 
@@ -344,6 +446,332 @@ export function departmentCounts() {
   return stmts.departmentCounts.all().map(r => ({
     department: r.department,
     count: r.n,
+  }));
+}
+
+// ---------------------------------------------------------------------------
+// Canonical products — the cross-flyer identity layer. Every `products` row is
+// a "sighting" (one flyer, one date, one store, one price) of a canonical
+// product; price history / deal-quality / trends all group by
+// canonical_product_id instead of the raw (per-flyer, free-text) category.
+// ---------------------------------------------------------------------------
+
+/** Products not yet linked to a canonical product — for the matching pass. */
+export function productsMissingCanonical(limit = 40) {
+  return stmts.missingCanonical.all(Math.max(1, Math.min(200, Number(limit) || 40)));
+}
+
+/**
+ * A cheap SQL shortlist of existing canonical products this one might be —
+ * same department only (never merge across departments), ranked by how the
+ * product's `category` relates to each candidate's `canonical_name`/`tags`
+ * using the same UDFs the Search tab already matches queries with.
+ *
+ * `category` text alone is NOT a safe identity signal — categories are
+ * brand-stripped, so "Lay's chips", "Pringles Snack Stacks" and a 16-pack of
+ * Frito-Lay variety bags can all share `category: "chips"` while being
+ * completely different products at completely different prices. So this only
+ * ever narrows the field; every candidate still goes to Gemini (which sees
+ * the full product NAME) to confirm — see matchCanonicalProducts / db.js
+ * canonicalMatch.js. No auto-link path exists on purpose.
+ */
+export function canonicalCandidatesForProduct(
+  {category, department},
+  limit = 5,
+) {
+  const dept = department || '';
+  const cat = (category || '').toLowerCase().trim();
+  if (!dept || !cat) {
+    return [];
+  }
+
+  const seen = new Map();
+  const add = rows => {
+    for (const r of rows) {
+      if (!seen.has(r.id)) {
+        seen.set(r.id, r);
+      }
+    }
+  };
+  add(stmts.canonicalExactCategory.all({department: dept, category: cat}));
+  add(stmts.canonicalHeadMatch.all({department: dept, needle: cat}));
+  add(stmts.canonicalTagMatch.all({department: dept, needle: cat}));
+
+  return [...seen.values()].slice(0, limit).map(r => ({
+    id: r.id,
+    canonicalName: r.canonical_name,
+    category: r.category || '',
+  }));
+}
+
+/**
+ * Write canonical-product matches. Each entry is either
+ * `{ productId, canonicalId, priceValue, store }` (links to an existing
+ * canonical product) or `{ productId, newCanonical: {canonicalName, category,
+ * department, tags}, priceValue, store }` (creates one first). Also resolves
+ * any open price alert on that canonical product this sighting's price
+ * satisfies. Returns `{ createdCount }`.
+ */
+export const applyCanonicalMatches = db.transaction(matches => {
+  let createdCount = 0;
+  const now = new Date().toISOString();
+
+  for (const m of matches) {
+    let canonicalId = m.canonicalId || null;
+    if (!canonicalId && m.newCanonical) {
+      canonicalId = randomUUID();
+      const nc = m.newCanonical;
+      stmts.insertCanonicalProduct.run({
+        id: canonicalId,
+        canonical_name: nc.canonicalName,
+        category: nc.category || null,
+        department: nc.department || null,
+        tags: nc.tags && nc.tags.length ? JSON.stringify(nc.tags) : null,
+        created_at: now,
+      });
+      createdCount++;
+    }
+    if (!canonicalId) {
+      continue;
+    }
+
+    stmts.updateProductCanonical.run({id: m.productId, canonical_product_id: canonicalId});
+
+    if (m.priceValue == null) {
+      continue;
+    }
+    for (const a of stmts.openAlertsForCanonical.all({
+      canonical_product_id: canonicalId,
+    })) {
+      if (a.store && m.store && a.store.toLowerCase() !== String(m.store).toLowerCase()) {
+        continue;
+      }
+      const hit =
+        a.comparison === 'lt' ? m.priceValue < a.target_price : m.priceValue <= a.target_price;
+      if (hit) {
+        stmts.resolveAlert.run({
+          id: a.id,
+          resolved_at: now,
+          resolved_product_id: m.productId,
+        });
+      }
+    }
+  }
+
+  return {createdCount};
+});
+
+/** "YYYY-MM-DD" `n` days before today. */
+function daysAgoIso(n) {
+  const d = new Date();
+  d.setDate(d.getDate() - n);
+  const p = x => String(x).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+}
+
+function daysBetween(fromIso, toIso) {
+  const a = new Date(`${fromIso}T00:00:00Z`).getTime();
+  const b = new Date(`${toIso}T00:00:00Z`).getTime();
+  return Math.round((b - a) / 86400000);
+}
+
+function median(nums) {
+  const s = [...nums].sort((a, b) => a - b);
+  const mid = Math.floor(s.length / 2);
+  return s.length % 2 ? s[mid] : (s[mid - 1] + s[mid]) / 2;
+}
+
+/**
+ * Chronological price sightings for one canonical product, optionally
+ * narrowed to one store or the last `months` months.
+ */
+export function priceHistory(canonicalProductId, {store, months} = {}) {
+  const conds = ['p.canonical_product_id = ?'];
+  const params = [canonicalProductId];
+  if (store) {
+    conds.push('f.store = ?');
+    params.push(store);
+  }
+  if (months) {
+    conds.push('(f.valid_from IS NULL OR f.valid_from = \'\' OR f.valid_from >= ?)');
+    params.push(daysAgoIso(Math.round(Number(months) * 30.44)));
+  }
+
+  const rows = db
+    .prepare(
+      `SELECT p.price, p.price_value, p.on_sale, f.store, f.valid_from, f.valid_to,
+              p.flyer_id, p.page
+         FROM products p JOIN flyers f ON f.id = p.flyer_id
+        WHERE ${conds.join(' AND ')}
+        ORDER BY f.valid_from ASC, p.created_at ASC`,
+    )
+    .all(...params);
+
+  return rows.map(r => ({
+    price: r.price || '',
+    priceValue: r.price_value,
+    onSale: !!r.on_sale,
+    store: r.store || '',
+    validFrom: r.valid_from || '',
+    validTo: r.valid_to || '',
+    flyerId: r.flyer_id,
+    page: r.page,
+  }));
+}
+
+/**
+ * Deal-quality / lowest-price / trend / retailer-compare / sale-frequency, all
+ * derived from the same sighting history — one aggregate so the client and the
+ * chat agent can each pull whichever field they need. Returns `null` when
+ * there's no history at all for this canonical product.
+ */
+export function priceInsight(canonicalProductId, {store} = {}) {
+  const history = priceHistory(canonicalProductId, {store});
+  const priced = history.filter(h => h.priceValue != null);
+  if (!priced.length) {
+    return null;
+  }
+
+  const current = priced[priced.length - 1];
+  const windowCutoff = daysAgoIso(90);
+  const windowRows = priced.filter(h => !h.validFrom || h.validFrom >= windowCutoff);
+  const pool = (windowRows.length ? windowRows : priced).map(h => h.priceValue);
+  const min90d = Math.min(...pool);
+  const median90d = median(pool);
+
+  let dealQuality = null;
+  if (current.priceValue <= min90d * 1.05) {
+    dealQuality = 'great';
+  } else if (current.priceValue <= median90d) {
+    dealQuality = 'good';
+  } else if (current.priceValue <= median90d * 1.15) {
+    dealQuality = 'average';
+  } else {
+    dealQuality = 'poor';
+  }
+
+  const isLowestInMonths = months => {
+    const cutoff = daysAgoIso(Math.round(months * 30.44));
+    const inWindow = priced.filter(h => !h.validFrom || h.validFrom >= cutoff);
+    return inWindow.length > 0 && current.priceValue <= Math.min(...inWindow.map(h => h.priceValue));
+  };
+
+  const saleDates = [...new Set(priced.filter(h => h.onSale && h.validFrom).map(h => h.validFrom))].sort();
+  let saleFrequencyDays = null;
+  if (saleDates.length >= 2) {
+    const gaps = saleDates.slice(1).map((d, i) => daysBetween(saleDates[i], d));
+    saleFrequencyDays = Math.round(median(gaps));
+  }
+
+  const byStoreMap = new Map();
+  for (const h of priced) {
+    if (!h.store) {
+      continue;
+    }
+    const entry = byStoreMap.get(h.store) || {
+      store: h.store,
+      latestPrice: null,
+      latestDate: '',
+      lowestPrice: null,
+    };
+    if (!entry.latestDate || h.validFrom >= entry.latestDate) {
+      entry.latestDate = h.validFrom;
+      entry.latestPrice = h.priceValue;
+    }
+    if (entry.lowestPrice == null || h.priceValue < entry.lowestPrice) {
+      entry.lowestPrice = h.priceValue;
+    }
+    byStoreMap.set(h.store, entry);
+  }
+
+  return {
+    currentPrice: current.priceValue,
+    min90d,
+    median90d,
+    isLowestIn3Months: isLowestInMonths(3),
+    isLowestIn6Months: isLowestInMonths(6),
+    isLowestIn12Months: isLowestInMonths(12),
+    dealQuality,
+    saleFrequencyDays,
+    byStore: [...byStoreMap.values()].map(({store: s, latestPrice, lowestPrice}) => ({
+      store: s,
+      latestPrice,
+      lowestPrice,
+    })),
+    sightings: history.length,
+  };
+}
+
+/**
+ * Resolve a loose product hint ("strawberries", "chicken breast") to a
+ * canonical product id — first against canonical products directly, then
+ * (for anything not yet linked by the matching pass) against any product row
+ * that already carries a canonical id. Returns `null` if nothing matches.
+ */
+export function resolveCanonicalId(hint) {
+  const h = String(hint || '').trim().toLowerCase();
+  if (!h) {
+    return null;
+  }
+  let row = db
+    .prepare(
+      `SELECT id FROM canonical_products
+        WHERE headmatch(lower(canonical_name), ?) OR tagexact(coalesce(tags,''), ?)
+        LIMIT 1`,
+    )
+    .get(h, h);
+  if (row) {
+    return row.id;
+  }
+  row = db
+    .prepare(
+      `SELECT canonical_product_id AS id FROM products
+        WHERE canonical_product_id IS NOT NULL
+          AND (headmatch(lower(coalesce(category,'')), ?)
+               OR tagexact(coalesce(tags,''), ?)
+               OR wordmatch(lower(coalesce(name,'') || ' ' || coalesce(info,'')), ?))
+        LIMIT 1`,
+    )
+    .get(h, h, h);
+  return row ? row.id : null;
+}
+
+// ---------------------------------------------------------------------------
+// Users + price alerts. No login — the client generates an anonymous
+// per-install id; these rows just give alerts somewhere to live.
+// ---------------------------------------------------------------------------
+
+/** Ensures a user row exists (no-op if it already does). */
+export function getOrCreateUser(userId) {
+  stmts.insertUserIgnore.run({id: userId, created_at: new Date().toISOString()});
+  return userId;
+}
+
+export function createAlert({userId, canonicalProductId, targetPrice, comparison, store}) {
+  const id = randomUUID();
+  stmts.insertAlert.run({
+    id,
+    user_id: userId,
+    canonical_product_id: canonicalProductId,
+    target_price: targetPrice,
+    comparison: comparison === 'lt' ? 'lt' : 'lte',
+    store: store || null,
+    created_at: new Date().toISOString(),
+  });
+  return id;
+}
+
+export function listAlerts(userId) {
+  return stmts.listAlertsByUser.all({user_id: userId}).map(r => ({
+    id: r.id,
+    canonicalProductId: r.canonical_product_id,
+    canonicalName: r.canonical_name,
+    targetPrice: r.target_price,
+    comparison: r.comparison,
+    store: r.store || '',
+    createdAt: r.created_at,
+    resolvedAt: r.resolved_at || null,
+    resolvedProductId: r.resolved_product_id || null,
   }));
 }
 
@@ -534,7 +962,10 @@ function buildWhere({q, departments, stores, statuses, onSale}, today) {
 const PRODUCT_COLS = `p.id, p.flyer_id, p.page, p.name, p.price, p.price_value, p.info,
        p.box, p.confidence, p.category, p.tags, p.department,
        p.was_price, p.promo_text, p.on_sale, p.has_thumb,
-       f.store, f.valid_from, f.valid_to`;
+       f.store, f.valid_from, f.valid_to,
+       p.canonical_product_id, cp.canonical_name`;
+// Every PRODUCT_COLS query's FROM must include this alongside `JOIN flyers f`.
+const CANONICAL_JOIN = 'LEFT JOIN canonical_products cp ON cp.id = p.canonical_product_id';
 
 /** One DB row -> the API product shape. */
 function mapProductRow(r, baseUrl) {
@@ -558,6 +989,8 @@ function mapProductRow(r, baseUrl) {
     validFrom: r.valid_from || '',
     validTo: r.valid_to || '',
     thumb: r.has_thumb ? `${baseUrl}/thumbs/${r.flyer_id}/${r.id}.jpg` : null,
+    canonicalProductId: r.canonical_product_id || null,
+    canonicalName: r.canonical_name || '',
   };
 }
 
@@ -651,6 +1084,7 @@ export function searchProducts(
       `SELECT ${PRODUCT_COLS}${scored ? `, (${scoreExpr}) AS score` : ''}
          FROM products p
          JOIN flyers f ON f.id = p.flyer_id
+         ${CANONICAL_JOIN}
          ${clause}
         ${orderBy}
         LIMIT ? OFFSET ?`,
@@ -778,6 +1212,7 @@ export function searchProductsExpanded(
       `SELECT ${PRODUCT_COLS}, (${scoreExpr}) AS match_score
          FROM products p
          JOIN flyers f ON f.id = p.flyer_id
+         ${CANONICAL_JOIN}
         ${where}
         ORDER BY match_score DESC, p.created_at DESC, p.rowid DESC
         LIMIT ?`,

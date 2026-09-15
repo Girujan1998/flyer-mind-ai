@@ -909,6 +909,123 @@ function parseObjectArray(text) {
   return out;
 }
 
+// --- Canonical-product matching (backfill / background pass) ----------------
+// Groups the same real-world product across flyers so price history means
+// anything. Cheap SQL shortlisting (db.js canonicalCandidatesForProduct)
+// happens first; this only runs for the ambiguous leftovers — one Gemini call
+// per batch, ref-keyed like categorizeProducts/assignDepartments above.
+
+const MATCH_SCHEMA = {
+  type: 'ARRAY',
+  items: {
+    type: 'OBJECT',
+    properties: {
+      ref: {type: 'INTEGER'},
+      matchRef: {type: 'INTEGER'},
+      canonicalName: {type: 'STRING'},
+    },
+    required: ['ref', 'matchRef', 'canonicalName'],
+  },
+};
+
+const MATCH_PROMPT = `You are given a numbered list of NEW products, each with a short list of
+CANDIDATE products that might already be the same real-world thing (same
+department, similar category text — the category is brand-stripped, so it is
+only a hint, never proof: "Lay's chips", "Pringles Snack Stacks" and a
+Frito-Lay 16-pack variety box can all say "[category: chips]" while being
+completely different products at completely different prices). For EACH new
+product, decide from its printed NAME whether it is truly the SAME product a
+shopper would recognise as one thing.
+
+- "ref": the new product's number, copied exactly.
+- "matchRef": the candidate number that is the SAME product, or 0 if none of
+  its candidates are.
+  - A PACKAGED / BRANDED product (chips, cereal, soda, cookies, ice cream,
+    detergent...) only matches a candidate of the SAME brand and SAME product
+    line — "Lay's Classic Chips" is NOT "Pringles Snack Stacks" and is NOT a
+    Frito-Lay variety pack, even though all three are "chips". Different pack
+    sizes of the identical brand+line still match.
+  - An unbranded COMMODITY (fresh produce, a cut of meat, a generic staple
+    like milk or eggs) matches on the item itself, brand/retailer-house-brand
+    aside — "2% milk" and "whole milk" both match plain "milk"; a store-brand
+    banana matches any other banana. But "chicken breast" is NOT "chicken
+    thighs", and "cantaloupe" is NOT "avocado" even when both are "[fruit]".
+- "canonicalName": ONLY when matchRef is 0 — a name specific enough that it
+  names only this product, 1-4 lowercase words. For a branded product, KEEP
+  the brand and line ("lay's classic chips", not "chips"). For a commodity,
+  use the plain generic name from the item's actual printed name, not the
+  (possibly too-broad) bracketed category: "Cantaloupes" [fruit] ->
+  "cantaloupe"; "Avocados" [fruit] -> "avocado". "" when matchRef is not 0.
+
+Return exactly one object per new product, nothing else.`;
+
+/**
+ * @param {Array<{ ref: number, name: string, info: string, category: string,
+ *   candidates: Array<{ ref: number, canonicalName: string, category: string }> }>} items
+ * @returns {Promise<{ result: Map<number, {matchRef: number, canonicalName: string}>, usage: object }>}
+ */
+export async function matchCanonicalProducts(items) {
+  if (process.env.GEMINI_API_KEY === 'MOCK') {
+    return {
+      result: new Map(
+        items.map(it => [
+          it.ref,
+          it.candidates.length
+            ? {matchRef: it.candidates[0].ref, canonicalName: ''}
+            : {matchRef: 0, canonicalName: it.category || 'mock item'},
+        ]),
+      ),
+      usage: {mock: true},
+    };
+  }
+
+  const {apiKey, model} = config();
+  const lines = items
+    .map(it => {
+      const head = `${it.ref}. NEW: "${it.name}"${it.info ? ` (${it.info})` : ''} [category: ${it.category || '?'}]`;
+      const cands = it.candidates.length
+        ? '   candidates: ' +
+          it.candidates
+            .map(c => `(${c.ref}) "${c.canonicalName}" [${c.category}]`)
+            .join('  ')
+        : '   candidates: (none)';
+      return `${head}\n${cands}`;
+    })
+    .join('\n');
+
+  const json = await callGemini(
+    {
+      contents: [{parts: [{text: MATCH_PROMPT}, {text: lines}]}],
+      generationConfig: {
+        temperature: 0,
+        responseMimeType: 'application/json',
+        responseSchema: MATCH_SCHEMA,
+        thinkingConfig: {thinkingBudget: 256},
+        maxOutputTokens: Math.min(65536, 200 * items.length + 4000),
+      },
+    },
+    apiKey,
+    model,
+  );
+
+  const candidate = json.candidates?.[0];
+  const text = candidate?.content?.parts?.[0]?.text ?? '';
+
+  const result = new Map();
+  for (const r of parseObjectArray(text)) {
+    const ref = Number(r.ref);
+    if (!Number.isInteger(ref)) {
+      continue;
+    }
+    result.set(ref, {
+      matchRef: Number.isInteger(r.matchRef) ? r.matchRef : 0,
+      canonicalName: cleanCategory(r.canonicalName),
+    });
+  }
+
+  return {result, usage: readUsage(json)};
+}
+
 // --- Department assignment (backfill) ---------------------------------------
 // Coarser than category. Given a list of generic categories (or names), assign
 // each to one fixed store aisle. Cheap: run it over the DISTINCT categories, not
@@ -994,7 +1111,7 @@ export async function assignDepartments(items) {
 // structured object and the server acts on it directly.
 // ---------------------------------------------------------------------------
 
-const CHAT_SYSTEM = `You are the shopping assistant in a grocery-flyer app. Users search products from local flyers.
+const CHAT_SYSTEM = `You are the shopping assistant in a grocery-flyer app. Users search products from local flyers, and can ask about prices.
 
 If the user names a product or category, use action "search":
 - "terms": lowercase search words. START with the plain noun alone ("salmon", "tomato", "milk"), THEN add singular/plural, varieties written in full ("roma tomato", "atlantic salmon"), close synonyms, 2-4 flyer brands. For scope "broad" ALSO add the aisle/category word ("pain relief" for medication); for scope "item" never the parent category ("fish", "meat", "cheese", "produce"). Max 8, <=3 words each.
@@ -1002,22 +1119,56 @@ If the user names a product or category, use action "search":
 - "must": ONLY when the user restricts it ("for kids", "gluten free", "unsalted") — words a result must ALSO contain, expanded like terms; keep the earlier "terms". "for kids" -> ["child","children","childrens","infant","toddler","junior"]. Else [].
 - "intent": what they want, 1-4 words, no verbs — "grapes", "kids medication".
 
-Otherwise use action "reply" (1-2 sentences). Don't answer general-knowledge questions — say you only help find flyer products.
+If the user asks whether a price is good, how a price compares to before, the
+lowest it's been, which store is cheapest, or how often something goes on
+sale — use action "price_insight":
+- "productHint": the plain item, 1-4 words, no brand ("strawberries", "chicken breast").
+- "insightType": "deal_quality" (is a price good — incl. "is $X a good price"), "lowest_price" (is this the lowest it's been recently), "trend" (how has it changed), "store_compare" (which store is cheapest), or "sale_frequency" (how often it goes on sale). Pick the closest one.
+- "targetPrice": the dollar amount they mentioned as a NUMBER (e.g. "$3.99" -> 3.99). 0 if none mentioned.
 
-Fill every field; unused ones "" or [].`;
+If the user asks to be told/notified/alerted when something's price drops to
+or below an amount, use action "set_alert":
+- "productHint": same style as above.
+- "targetPrice": the dollar amount as a NUMBER — required. If they gave no
+  number, use action "reply" and ask them for one instead.
+- "comparison": "lt" if they said "under"/"below" a price, else "lte".
+
+Otherwise use action "reply" (1-2 sentences). Don't answer general-knowledge questions — say you only help find and track flyer products.
+
+Fill every field; unused ones "" or [] or 0.`;
 
 const CHAT_SCHEMA = {
   type: 'OBJECT',
   properties: {
-    action: {type: 'STRING', enum: ['search', 'reply']},
+    action: {type: 'STRING', enum: ['search', 'price_insight', 'set_alert', 'reply']},
     terms: {type: 'ARRAY', items: {type: 'STRING'}},
     scope: {type: 'STRING', enum: ['item', 'broad']},
     must: {type: 'ARRAY', items: {type: 'STRING'}},
     intent: {type: 'STRING'},
+    productHint: {type: 'STRING'},
+    insightType: {
+      type: 'STRING',
+      enum: ['deal_quality', 'lowest_price', 'trend', 'store_compare', 'sale_frequency'],
+    },
+    targetPrice: {type: 'NUMBER'},
+    comparison: {type: 'STRING', enum: ['lt', 'lte']},
     reply: {type: 'STRING'},
   },
-  required: ['action', 'terms', 'scope', 'must', 'intent', 'reply'],
+  required: [
+    'action',
+    'terms',
+    'scope',
+    'must',
+    'intent',
+    'productHint',
+    'insightType',
+    'targetPrice',
+    'comparison',
+    'reply',
+  ],
 };
+
+const INSIGHT_TYPES = ['deal_quality', 'lowest_price', 'trend', 'store_compare', 'sale_frequency'];
 
 const GENERIC_REPLY =
   'I can only help you find products in the flyers. Try "find me some grapes" or "I need toilet paper".';
@@ -1057,6 +1208,8 @@ function cleanTerms(value) {
  *   Trimmed recent history, ending with the new user turn.
  * @returns {Promise<
  *   | { kind: 'search', terms: string[], scope: 'item'|'broad', must: string[], intent: string, usage: object }
+ *   | { kind: 'price_insight', productHint: string, insightType: string, targetPrice: number|null, usage: object }
+ *   | { kind: 'set_alert', productHint: string, targetPrice: number, comparison: 'lt'|'lte', usage: object }
  *   | { kind: 'reply', text: string, usage: object }
  * >}
  */
@@ -1095,7 +1248,7 @@ export async function chatAgent(messages) {
         responseMimeType: 'application/json',
         responseSchema: CHAT_SCHEMA,
         thinkingConfig: {thinkingBudget: 0},
-        maxOutputTokens: 256,
+        maxOutputTokens: 320,
       },
     },
     apiKey,
@@ -1116,35 +1269,65 @@ export async function chatAgent(messages) {
   const terms = cleanTerms(parsed.terms);
   const must = cleanTerms(parsed.must);
   const scope = parsed.scope === 'broad' ? 'broad' : 'item';
-  const result =
-    parsed.action === 'search' && terms.length
-      ? {
-          kind: 'search',
-          terms,
-          scope,
-          must,
-          intent: String(parsed.intent || '').slice(0, 60),
-          usage,
-        }
-      : {
-          kind: 'reply',
-          text: (String(parsed.reply || '').trim() || GENERIC_REPLY).slice(
-            0,
-            400,
-          ),
-          usage,
-        };
+  const productHint = String(parsed.productHint || '').trim().slice(0, 60);
+  const targetPrice =
+    Number.isFinite(parsed.targetPrice) && parsed.targetPrice > 0
+      ? Math.round(parsed.targetPrice * 100) / 100
+      : null;
+
+  let result;
+  if (parsed.action === 'search' && terms.length) {
+    result = {
+      kind: 'search',
+      terms,
+      scope,
+      must,
+      intent: String(parsed.intent || '').slice(0, 60),
+      usage,
+    };
+  } else if (parsed.action === 'price_insight' && productHint) {
+    result = {
+      kind: 'price_insight',
+      productHint,
+      insightType: INSIGHT_TYPES.includes(parsed.insightType)
+        ? parsed.insightType
+        : 'deal_quality',
+      targetPrice,
+      usage,
+    };
+  } else if (parsed.action === 'set_alert' && productHint && targetPrice) {
+    result = {
+      kind: 'set_alert',
+      productHint,
+      targetPrice,
+      comparison: parsed.comparison === 'lt' ? 'lt' : 'lte',
+      usage,
+    };
+  } else {
+    result = {
+      kind: 'reply',
+      text: (String(parsed.reply || '').trim() || GENERIC_REPLY).slice(0, 400),
+      usage,
+    };
+  }
+
+  const detail =
+    result.kind === 'search'
+      ? `  ${result.scope}  [${result.terms.join(', ')}]` +
+        (result.must.length ? `  must:[${result.must.join(', ')}]` : '')
+      : result.kind === 'price_insight'
+      ? `  ${result.insightType}  "${result.productHint}"` +
+        (result.targetPrice ? `  $${result.targetPrice}` : '')
+      : result.kind === 'set_alert'
+      ? `  "${result.productHint}" ${result.comparison} $${result.targetPrice}`
+      : '';
 
   console.log(
     `[gemini] chat ${result.kind}  turns=${messages.length}  prompt=${n(
       usage.promptTokens,
     )} output=${n(usage.outputTokens)} thoughts=${n(
       usage.thoughtsTokens,
-    )} total=${n(usage.totalTokens)}` +
-      (result.kind === 'search'
-        ? `  ${result.scope}  [${result.terms.join(', ')}]` +
-          (result.must.length ? `  must:[${result.must.join(', ')}]` : '')
-        : ''),
+    )} total=${n(usage.totalTokens)}${detail}`,
   );
 
   await appendUsageLog({
@@ -1156,6 +1339,9 @@ export async function chatAgent(messages) {
     scope: result.kind === 'search' ? result.scope : undefined,
     terms: result.kind === 'search' ? result.terms : [],
     must: result.kind === 'search' ? result.must : [],
+    productHint: result.productHint,
+    insightType: result.insightType,
+    targetPrice: result.targetPrice,
     ...usage,
   });
 

@@ -72,6 +72,49 @@ extra request, ~25 extra output tokens each):
 — and `GET /departments` returns `{ departments: [{ department, count }] }` for
 the app's filter chips.
 
+## Canonical products — price history across flyers
+
+`category`/`tags` are free text per Gemini call, so the same real-world item
+can land under different text in different flyers ("berries" one week,
+"strawberries" the next) — not stable enough to compare a price against its
+own history. `canonical_products` is a second, stable identity layer every
+`products` row (a "sighting" — one flyer, one date, one store, one price)
+links to via `canonical_product_id`, so price history/trend/deal-quality
+features group by canonical product instead of raw category text.
+
+Matching runs in two stages, for every product still missing a link:
+
+1. A cheap SQL shortlist — same `department` only, category/tag overlap
+   against existing canonical products (the `wordmatch`/`headmatch`/`tagexact`
+   functions already used for search, just pointed at `canonical_products`).
+2. One batched Gemini call per ~40 products (`matchCanonicalProducts` in
+   `src/gemini.js`) picks a candidate or proposes a new canonical product,
+   from the full product **name** — category text alone is never trusted to
+   auto-link (a brand-stripped category like `"chips"` covers Lay's, Pringles
+   and a Frito-Lay variety box at very different prices).
+
+It runs automatically, fire-and-forget, right after every upload (no added
+latency on the upload response) — `src/canonicalMatch.js`. To (re)process the
+existing backlog by hand:
+
+```bash
+node scripts/match-canonical-products.mjs [--batch 40] [--dry]
+```
+
+`GET /products` includes `canonicalProductId`/`canonicalName` on every row
+once linked (`null`/`""` until the matching pass catches up — usually
+seconds). See **API** below for `/price-history` and `/price-insight`.
+
+## Price alerts
+
+`price_alerts` rows (`canonical_product_id`, `target_price`, `comparison`)
+belong to an anonymous per-install `users` id the app sends as `X-User-Id` —
+no login. Alert matching rides the same canonical-matching pass: once a new
+sighting is linked, any open alert on that canonical product whose price
+condition it satisfies gets resolved right there, in the same transaction.
+See `POST /alerts` / `GET /alerts` below. There's no push-notification
+delivery yet — alerts are visible in-app via `GET /alerts` only.
+
 ## On sale vs. just listed
 
 Each product also carries, from the same vision call:
@@ -185,6 +228,52 @@ zeroes its own rows. `statuses` omits any state no matching product is in.
 
 `{ "departments": [{ "department": "pantry", "count": 80 }, …] }` — every aisle
 that has products, busiest first.
+
+### `GET /price-history/<canonicalProductId>?store=&months=`
+
+Chronological price sightings for one canonical product across every flyer
+it's appeared in — "$4.99 today; previous: $5.49, $4.49, $5.99". `store`
+narrows to one retailer; `months` to a trailing window.
+
+```jsonc
+{
+  "history": [
+    { "price": "$4.99", "priceValue": 4.99, "onSale": false, "store": "Some Grocer",
+      "validFrom": "2026-08-27", "validTo": "2026-09-02", "flyerId": "…", "page": 3 }
+  ]
+}
+```
+
+### `GET /price-insight/<canonicalProductId>?store=`
+
+One aggregate over the same history — deal quality, lowest-price tracking,
+retailer comparison and sale-frequency, all from real `price_value` numbers
+(never a model guess). `404` if the canonical product has no history yet.
+
+```jsonc
+{
+  "currentPrice": 4.99, "min90d": 3.99, "median90d": 4.49,
+  "isLowestIn3Months": false, "isLowestIn6Months": false, "isLowestIn12Months": false,
+  "dealQuality": "average", "saleFrequencyDays": 24,
+  "byStore": [{ "store": "Some Grocer", "latestPrice": 4.99, "lowestPrice": 3.99 }],
+  "sightings": 6
+}
+```
+
+### `GET /alerts` · `POST /alerts`
+
+Both require an `X-User-Id` header (the app's anonymous per-install id).
+`GET` lists this device's alerts, open ones first. `POST` creates one:
+
+```jsonc
+// POST body
+{ "canonicalProductId": "…", "targetPrice": 4.99, "comparison": "lte", "store": "" }
+// -> { "id": "…" }
+```
+
+`comparison` is `"lte"` (default) or `"lt"`. An alert resolves automatically
+(`resolvedAt`/`resolvedProductId` set) the next time a matching sighting's
+price satisfies it — see **Price alerts** above.
 
 ### `GET /pages/<flyerId>/<page>.jpg` · `GET /thumbs/<flyerId>/<id>.jpg`
 

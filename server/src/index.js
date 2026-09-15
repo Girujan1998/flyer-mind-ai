@@ -8,13 +8,20 @@ import cors from 'cors';
 import express from 'express';
 import multer from 'multer';
 
+import {runCanonicalMatchingBatch} from './canonicalMatch.js';
 import {
   PAGES_DIR,
   THUMBS_DIR,
+  createAlert,
   departmentCounts,
   filterFacets,
   findFlyerByHash,
+  getOrCreateUser,
+  listAlerts,
+  priceHistory,
+  priceInsight,
   productCountForFlyer,
+  resolveCanonicalId,
   saveExtraction,
   searchProducts,
   searchProductsExpanded,
@@ -23,6 +30,38 @@ import {
 import {chatAgent, extractFlyer, extractFlyerMeta} from './gemini.js';
 import {renderPdf} from './pdf.js';
 import {renderThumbs} from './thumbs.js';
+
+// Runs the canonical-product matching pass after every upload, without
+// blocking the upload response — see server/src/canonicalMatch.js. A simple
+// lock + "run again" flag means overlapping uploads never run it twice at
+// once; the second just gets its own pass right after the first finishes.
+let canonicalMatchRunning = false;
+let canonicalMatchQueued = false;
+
+function triggerCanonicalMatching() {
+  if (canonicalMatchRunning) {
+    canonicalMatchQueued = true;
+    return;
+  }
+  canonicalMatchRunning = true;
+  runCanonicalMatchingBatch({log: () => {}})
+    .then(({done, created, calls, tokens}) => {
+      if (done) {
+        console.log(
+          `[canonical-match] linked ${done} product(s), ${created} new canonical product(s), ` +
+            `${calls} Gemini call(s), ${tokens} tokens`,
+        );
+      }
+    })
+    .catch(err => console.error('[canonical-match] failed:', err))
+    .finally(() => {
+      canonicalMatchRunning = false;
+      if (canonicalMatchQueued) {
+        canonicalMatchQueued = false;
+        triggerCanonicalMatching();
+      }
+    });
+}
 
 /** First non-internal IPv4 address — the one a phone on the same Wi-Fi uses. */
 function lanAddress() {
@@ -147,6 +186,10 @@ async function runExtraction({buffer, name, hash, rendered, maxPages}) {
         1,
       )}s`,
   );
+
+  // Fire-and-forget — groups the new products into canonical products (price
+  // history's identity layer) without adding latency to this response.
+  triggerCanonicalMatching();
 
   return {
     flyerId,
@@ -312,11 +355,151 @@ app.get('/filters', (req, res) => {
 });
 
 /**
+ * GET /price-history/:canonicalProductId?store=&months=
+ *   -> { history: [{ price, priceValue, onSale, store, validFrom, validTo, flyerId, page }] }
+ * Chronological sightings of one canonical product across every flyer it's
+ * appeared in, e.g. "$4.99 today; previous: $5.49, $4.49, $5.99".
+ */
+app.get('/price-history/:canonicalProductId', (req, res) => {
+  try {
+    const history = priceHistory(req.params.canonicalProductId, {
+      store: req.query.store,
+      months: req.query.months ? Number(req.query.months) : undefined,
+    });
+    res.json({history});
+  } catch (err) {
+    console.error('[price-history] failed:', err);
+    res.status(500).json({error: err?.message || 'Query failed'});
+  }
+});
+
+/**
+ * GET /price-insight/:canonicalProductId?store=
+ *   -> { currentPrice, min90d, median90d, isLowestIn3Months, isLowestIn6Months,
+ *        isLowestIn12Months, dealQuality, saleFrequencyDays, byStore, sightings }
+ * One aggregate over the price history — deal quality, lowest-price tracking,
+ * retailer comparison and sale-frequency all come from this single endpoint.
+ */
+app.get('/price-insight/:canonicalProductId', (req, res) => {
+  try {
+    const insight = priceInsight(req.params.canonicalProductId, {
+      store: req.query.store,
+    });
+    if (!insight) {
+      return res.status(404).json({error: 'No price history for this product yet.'});
+    }
+    res.json(insight);
+  } catch (err) {
+    console.error('[price-insight] failed:', err);
+    res.status(500).json({error: err?.message || 'Query failed'});
+  }
+});
+
+const userIdOf = req => {
+  const id = req.header('x-user-id');
+  return typeof id === 'string' && id.trim() ? id.trim().slice(0, 100) : null;
+};
+
+/** GET /alerts -> { alerts: [...] } for the device sending X-User-Id. */
+app.get('/alerts', (req, res) => {
+  try {
+    const userId = userIdOf(req);
+    if (!userId) {
+      return res.status(400).json({error: 'Missing X-User-Id header.'});
+    }
+    res.json({alerts: listAlerts(userId)});
+  } catch (err) {
+    console.error('[alerts] failed:', err);
+    res.status(500).json({error: err?.message || 'Query failed'});
+  }
+});
+
+/**
+ * POST /alerts  { canonicalProductId, targetPrice, comparison?, store? }
+ *   -> { id }
+ * Creates a price alert for the device sending X-User-Id (created on first use).
+ */
+app.post('/alerts', express.json({limit: '4kb'}), (req, res) => {
+  try {
+    const userId = userIdOf(req);
+    if (!userId) {
+      return res.status(400).json({error: 'Missing X-User-Id header.'});
+    }
+    const {canonicalProductId, targetPrice, comparison, store} = req.body || {};
+    if (!canonicalProductId || !(Number(targetPrice) > 0)) {
+      return res
+        .status(400)
+        .json({error: 'canonicalProductId and a positive targetPrice are required.'});
+    }
+    getOrCreateUser(userId);
+    const id = createAlert({
+      userId,
+      canonicalProductId,
+      targetPrice: Number(targetPrice),
+      comparison: comparison === 'lt' ? 'lt' : 'lte',
+      store: store || null,
+    });
+    res.status(201).json({id});
+  } catch (err) {
+    console.error('[alerts] failed:', err);
+    res.status(500).json({error: err?.message || 'Could not create alert'});
+  }
+});
+
+// Deterministic reply text for a "price_insight" chat turn — every number in
+// here comes straight from priceInsight()'s SQL aggregates, never from Gemini,
+// so the agent can never state a price or trend it made up.
+function composePriceInsightReply(agent, insight) {
+  const {productHint, insightType, targetPrice} = agent;
+  const fmt = v => (v == null ? null : `$${v.toFixed(2)}`);
+
+  if (targetPrice) {
+    if (insight.min90d == null) {
+      return `I don't have enough price history on ${productHint} yet to judge $${targetPrice.toFixed(2)}.`;
+    }
+    if (targetPrice <= insight.min90d * 1.05) {
+      return `$${targetPrice.toFixed(2)} is a great price for ${productHint} — that matches its lowest price in the last 90 days (${fmt(insight.min90d)}).`;
+    }
+    if (targetPrice <= insight.median90d) {
+      return `$${targetPrice.toFixed(2)} is a good price for ${productHint} — below its typical price of ${fmt(insight.median90d)} (lowest recently: ${fmt(insight.min90d)}).`;
+    }
+    return `$${targetPrice.toFixed(2)} isn't a great deal on ${productHint} — it's been as low as ${fmt(insight.min90d)}, typically around ${fmt(insight.median90d)}.`;
+  }
+
+  switch (insightType) {
+    case 'lowest_price':
+      return insight.isLowestIn3Months
+        ? `Yes — ${fmt(insight.currentPrice)} is the lowest ${productHint} has been in at least 3 months.`
+        : `Not quite — ${productHint} is ${fmt(insight.currentPrice)} now; its lowest in the last 3 months was ${fmt(insight.min90d)}.`;
+    case 'store_compare': {
+      if (!insight.byStore.length) {
+        return `I don't have store-by-store data on ${productHint} yet.`;
+      }
+      const cheapest = [...insight.byStore].sort(
+        (a, b) => (a.latestPrice ?? Infinity) - (b.latestPrice ?? Infinity),
+      )[0];
+      return `${cheapest.store} usually has the best price on ${productHint}, most recently ${fmt(cheapest.latestPrice)}.`;
+    }
+    case 'sale_frequency':
+      return insight.saleFrequencyDays
+        ? `${productHint} tends to go on sale about every ${insight.saleFrequencyDays} days.`
+        : `I don't have enough sale history on ${productHint} yet to tell.`;
+    case 'trend':
+      return `${productHint} is ${fmt(insight.currentPrice)} now; it's ranged from ${fmt(insight.min90d)} to around ${fmt(insight.median90d)} in the last 90 days.`;
+    case 'deal_quality':
+    default:
+      return insight.dealQuality
+        ? `${productHint} at ${fmt(insight.currentPrice)} looks like a ${insight.dealQuality} deal (recent low: ${fmt(insight.min90d)}, typical: ${fmt(insight.median90d)}).`
+        : `I don't have enough price history on ${productHint} yet to judge.`;
+  }
+}
+
+/**
  * POST /chat  { messages: [{ role: 'user'|'assistant', content }] }
  *   -> { reply, products: [...], pages: [...], terms: [...] }
  *
- * The Chat-tab agent. One Gemini call turns the latest user turn into either
- * search terms (-> expanded product lookup, templated reply) or a short reply.
+ * The Chat-tab agent. One Gemini call turns the latest user turn into a
+ * search, a price question, a new price alert, or a short reply.
  */
 app.post('/chat', express.json({limit: '32kb'}), async (req, res) => {
   try {
@@ -350,6 +533,60 @@ app.post('/chat', express.json({limit: '32kb'}), async (req, res) => {
           (must.length ? `, filtered to: ${must.join(', ')}` : '') +
           '.';
       return res.json({reply, products, pages, terms, must});
+    }
+
+    if (agent.kind === 'price_insight') {
+      const canonicalId = resolveCanonicalId(agent.productHint);
+      const insight = canonicalId ? priceInsight(canonicalId) : null;
+      const reply = insight
+        ? composePriceInsightReply(agent, insight)
+        : `I don't have enough price history for "${agent.productHint}" yet — it needs to show up in a couple of flyers first.`;
+      return res.json({
+        reply,
+        products: [],
+        pages: [],
+        terms: [],
+        must: [],
+        priceInsight: insight,
+      });
+    }
+
+    if (agent.kind === 'set_alert') {
+      const canonicalId = resolveCanonicalId(agent.productHint);
+      if (!canonicalId) {
+        return res.json({
+          reply: `I don't recognize "${agent.productHint}" yet — try again once it's shown up in a flyer.`,
+          products: [],
+          pages: [],
+          terms: [],
+          must: [],
+        });
+      }
+      const userId = userIdOf(req);
+      if (!userId) {
+        return res.json({
+          reply: `I couldn't set that alert — missing device id.`,
+          products: [],
+          pages: [],
+          terms: [],
+          must: [],
+        });
+      }
+      getOrCreateUser(userId);
+      createAlert({
+        userId,
+        canonicalProductId: canonicalId,
+        targetPrice: agent.targetPrice,
+        comparison: agent.comparison,
+      });
+      const cmp = agent.comparison === 'lt' ? 'under' : 'at or under';
+      return res.json({
+        reply: `Got it — I'll let you know when ${agent.productHint} drops ${cmp} $${agent.targetPrice.toFixed(2)}.`,
+        products: [],
+        pages: [],
+        terms: [],
+        must: [],
+      });
     }
 
     return res.json({
