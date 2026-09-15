@@ -311,6 +311,7 @@ app.get('/products', (req, res) => {
         departments: req.query.department,
         stores: req.query.store,
         statuses: req.query.status,
+        includeExpired: req.query.expired,
         onSale: req.query.sale,
         limit: req.query.limit,
         offset: req.query.offset,
@@ -346,6 +347,7 @@ app.get('/filters', (req, res) => {
         departments: req.query.department,
         stores: req.query.store,
         statuses: req.query.status,
+        includeExpired: req.query.expired,
         onSale: req.query.sale,
       }),
     );

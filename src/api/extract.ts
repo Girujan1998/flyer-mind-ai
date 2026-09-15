@@ -340,9 +340,14 @@ export type SearchResult = {
 export type ProductFilters = {
   departments: string[];
   stores: string[];
+  /** Active/upcoming/no-dates statuses to narrow to. Never includes 'expired'
+   * — expired flyers are folded in via `includeExpired` instead, alongside
+   * whatever else is selected, rather than as a narrow-to-expired-only pick. */
   statuses: string[];
   /** Show only products the flyer explicitly frames as a deal. */
   onSale: boolean;
+  /** Also show expired flyers, in addition to everything else selected. */
+  includeExpired: boolean;
 };
 
 export const EMPTY_FILTERS: ProductFilters = {
@@ -350,6 +355,7 @@ export const EMPTY_FILTERS: ProductFilters = {
   stores: [],
   statuses: [],
   onSale: false,
+  includeExpired: false,
 };
 
 export function countActiveFilters(f: ProductFilters): number {
@@ -357,7 +363,8 @@ export function countActiveFilters(f: ProductFilters): number {
     f.departments.length +
     f.stores.length +
     f.statuses.length +
-    (f.onSale ? 1 : 0)
+    (f.onSale ? 1 : 0) +
+    (f.includeExpired ? 1 : 0)
   );
 }
 
@@ -370,6 +377,7 @@ function filtersToQuery(f: ProductFilters): string[] {
     csv('store', f.stores),
     csv('status', f.statuses),
     f.onSale ? 'sale=1' : '',
+    f.includeExpired ? 'expired=1' : '',
   ];
 }
 
@@ -398,9 +406,13 @@ export type Facet = {value: string; count: number};
 export type FilterFacets = {
   departments: Facet[];
   stores: Facet[];
+  /** Non-expired statuses only — see `expiredCount` for expired. */
   statuses: Facet[];
   /** How many of the (otherwise-filtered) products are on sale. */
   saleCount: number;
+  /** How many expired products match everything else selected — i.e. what
+   * turning on "include expired" would add. */
+  expiredCount: number;
   /** How many products the whole current selection returns. */
   total: number;
 };

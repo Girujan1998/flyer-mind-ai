@@ -162,8 +162,8 @@ function FilterModal({
 
           <Text style={styles.hint}>
             Leave a section untouched to include everything in it — except
-            expired flyers, which are hidden by default. Select Expired below to
-            show them.
+            expired flyers, which are hidden by default. Turn on "Show expired
+            products" below to include them too.
           </Text>
 
           <ScrollView
@@ -199,6 +199,31 @@ function FilterModal({
               v => setDraft(d => ({...d, statuses: toggle(d.statuses, v)})),
               v => STATUS_LABEL[v] ?? titleCase(v),
             )}
+            <View style={styles.section}>
+              <Pressable
+                onPress={() =>
+                  setDraft(d => ({...d, includeExpired: !d.includeExpired}))
+                }
+                accessibilityRole="checkbox"
+                accessibilityState={{checked: draft.includeExpired}}
+                style={({pressed}) => [
+                  styles.row,
+                  pressed && styles.rowPressed,
+                ]}>
+                <View
+                  style={[styles.box, draft.includeExpired && styles.boxOn]}>
+                  {draft.includeExpired ? <View style={styles.tick} /> : null}
+                </View>
+                <Text style={styles.rowLabel}>Also show expired products</Text>
+                <Text
+                  style={[
+                    styles.rowCount,
+                    (shown.expiredCount ?? 0) === 0 && styles.rowZero,
+                  ]}>
+                  {shown.expiredCount ?? 0}
+                </Text>
+              </Pressable>
+            </View>
             {section(
               'Category',
               shown.departments,

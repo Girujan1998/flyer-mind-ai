@@ -40,6 +40,7 @@ const NO_FACETS: FilterFacets = {
   stores: [],
   statuses: [],
   saleCount: 0,
+  expiredCount: 0,
   total: 0,
 };
 

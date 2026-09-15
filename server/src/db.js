@@ -940,10 +940,18 @@ export const STATUSES = ['valid', 'upcoming', 'expired', 'unknown'];
 // default to hiding expired flyers rather than showing everything.
 const DEFAULT_VISIBLE_STATUSES = STATUSES.filter(s => s !== 'expired');
 
-/** `statuses` as given, or the default "everything but expired" when empty. */
-function effectiveStatuses(statuses) {
+/**
+ * `statuses` as given, or the default "everything but expired" when empty —
+ * with `expired` folded back in when `includeExpired` is set, alongside
+ * whatever else is in play (not as an allowlist of expired alone).
+ */
+function effectiveStatuses(statuses, includeExpired) {
   const stz = toList(statuses).filter(s => STATUSES.includes(s));
-  return stz.length ? stz : DEFAULT_VISIBLE_STATUSES;
+  const base = stz.length ? stz : DEFAULT_VISIBLE_STATUSES;
+  if (truthy(includeExpired) && !base.includes('expired')) {
+    return [...base, 'expired'];
+  }
+  return base;
 }
 
 /** Local "YYYY-MM-DD" — compared string-wise against the flyer date columns. */
@@ -1167,11 +1175,23 @@ function collectPages(products, baseUrl) {
  * Paginated search over all stored products, newest first.
  * `q` matches name/info/category/tags; `departments` / `stores` / `statuses`
  * are optional arrays (or comma strings) that further narrow the set.
+ * Expired flyers are hidden unless `statuses` explicitly asks for them or
+ * `includeExpired` is set (which folds expired in alongside everything else,
+ * rather than narrowing to expired alone).
  * `baseUrl` is `http://<host>` — used to build page + thumbnail URLs.
  * Returns { products, pages, total, hasMore }.
  */
 export function searchProducts(
-  {q = '', departments, stores, statuses, onSale, limit = 20, offset = 0},
+  {
+    q = '',
+    departments,
+    stores,
+    statuses,
+    includeExpired,
+    onSale,
+    limit = 20,
+    offset = 0,
+  },
   baseUrl,
 ) {
   const lim = Math.max(1, Math.min(100, Number(limit) || 20));
@@ -1179,7 +1199,13 @@ export function searchProducts(
   const today = todayIso();
 
   const {clause, params, query} = buildWhere(
-    {q, departments, stores, statuses: effectiveStatuses(statuses), onSale},
+    {
+      q,
+      departments,
+      stores,
+      statuses: effectiveStatuses(statuses, includeExpired),
+      onSale,
+    },
     today,
   );
 
@@ -1398,11 +1424,12 @@ export function filterFacets({
   departments,
   stores,
   statuses,
+  includeExpired,
   onSale,
 } = {}) {
   const today = todayIso();
   const FROM = 'FROM products p JOIN flyers f ON f.id = p.flyer_id';
-  const effStatuses = effectiveStatuses(statuses);
+  const effStatuses = effectiveStatuses(statuses, includeExpired);
 
   // departments list — every filter except departments
   const dw = buildWhere({q, stores, statuses: effStatuses, onSale}, today);
@@ -1456,11 +1483,17 @@ export function filterFacets({
   return {
     departments: deptRows.map(r => ({value: r.value, count: r.n})),
     stores: storeRows.map(r => ({value: r.value, count: r.n})),
-    // every state that has a match, alphabetically
+    // every non-expired state that has a match, alphabetically — expired is
+    // offered separately via `expiredCount` and the "include expired" toggle,
+    // not as one more option in this allowlist.
     statuses: [...STATUSES]
+      .filter(s => s !== 'expired')
       .sort()
       .filter(s => byStatus.get(s))
       .map(s => ({value: s, count: byStatus.get(s)})),
+    // how many expired products match everything else selected — i.e. what
+    // turning on "include expired" would add, not a replacement for the rest.
+    expiredCount: byStatus.get('expired') || 0,
     saleCount,
     total,
   };
