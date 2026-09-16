@@ -959,7 +959,7 @@ function effectiveStatuses(statuses, includeExpired, expiredOnly) {
 }
 
 /** Local "YYYY-MM-DD" — compared string-wise against the flyer date columns. */
-function todayIso() {
+export function todayIso() {
   const d = new Date();
   const p = n => String(n).padStart(2, '0');
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
@@ -1329,7 +1329,7 @@ const STOP_TERMS = new Set([
 export function searchProductsExpanded(
   termsIn,
   baseUrl,
-  {limit = 24, must: mustIn = [], broad = false} = {},
+  {limit = 24, must: mustIn = [], broad = false, includeExpired = false} = {},
 ) {
   const norm = list =>
     [
@@ -1345,6 +1345,7 @@ export function searchProductsExpanded(
     return {products: [], pages: [], terms: [], must: [], total: 0};
   }
   const must = norm(mustIn);
+  const today = todayIso();
 
   const lim = Math.max(1, Math.min(50, Number(limit) || 24));
   // Full searchable text for one product; `"` and `,` in the tags JSON act as
@@ -1381,7 +1382,18 @@ export function searchProductsExpanded(
   const mustClause = must.length
     ? ` AND (${must.map(() => `wordmatch(${blob}, ?)`).join(' OR ')})`
     : '';
-  const where = `WHERE (${orClause})${mustClause}`;
+
+  // Chat search shows only active/upcoming flyers by default, same as the
+  // Search tab — expired ones are historical data, only pulled in when the
+  // agent explicitly asks for them (see `includeExpired`).
+  const effStatuses = effectiveStatuses(undefined, includeExpired, false);
+  const statusClause =
+    effStatuses.length < STATUSES.length
+      ? ` AND (${STATUS_CASE}) IN (${effStatuses.map(() => '?').join(',')})`
+      : '';
+  const statusBinds = statusClause ? [today, today, ...effStatuses] : [];
+
+  const where = `WHERE (${orClause})${mustClause}${statusClause}`;
 
   const rows = db
     .prepare(
@@ -1393,8 +1405,8 @@ export function searchProductsExpanded(
         ORDER BY match_score DESC, p.created_at DESC, p.rowid DESC
         LIMIT ?`,
     )
-    // bind order = statement text: SELECT score, WHERE (incl, must), LIMIT
-    .all(...scoreBinds, ...inclBinds, ...must, lim);
+    // bind order = statement text: SELECT score, WHERE (incl, must, status), LIMIT
+    .all(...scoreBinds, ...inclBinds, ...must, ...statusBinds, lim);
 
   const total = db
     .prepare(
@@ -1402,7 +1414,7 @@ export function searchProductsExpanded(
          FROM products p JOIN flyers f ON f.id = p.flyer_id
         ${where}`,
     )
-    .get(...inclBinds, ...must).n;
+    .get(...inclBinds, ...must, ...statusBinds).n;
 
   const products = rows.map(r => mapProductRow(r, baseUrl));
   return {products, pages: collectPages(products, baseUrl), terms, must, total};

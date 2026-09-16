@@ -26,6 +26,7 @@ import {
   saveExtraction,
   searchProducts,
   searchProductsExpanded,
+  todayIso,
   totalProducts,
 } from './db.js';
 import {chatAgent, extractFlyer, extractFlyerMeta} from './gemini.js';
@@ -451,6 +452,33 @@ app.post('/alerts', express.json({limit: '4kb'}), (req, res) => {
   }
 });
 
+// For a "search" chat reply: state the cheapest currently-active match, and
+// call out an upcoming one only when it's actually cheaper (never just
+// present, to avoid noise). `products` is already filtered to non-expired
+// statuses by the caller, so "active" here just means "not upcoming yet".
+function cheapestPriceNote(products, today) {
+  const priced = products.filter(p => Number.isFinite(p.priceValue));
+  const isUpcoming = p => !!p.validFrom && p.validFrom > today;
+  const cheapestOf = list =>
+    list.length ? list.reduce((a, b) => (b.priceValue < a.priceValue ? b : a)) : null;
+  const active = cheapestOf(priced.filter(p => !isUpcoming(p)));
+  const upcoming = cheapestOf(priced.filter(isUpcoming));
+
+  if (active) {
+    const note = ` Cheapest right now: ${active.price} at ${active.store}.`;
+    return upcoming && upcoming.priceValue < active.priceValue
+      ? note +
+          ` An upcoming flyer has it cheaper — ${upcoming.price} at ` +
+          `${upcoming.store} starting ${formatWeekOf(upcoming.validFrom)}.`
+      : note;
+  }
+  return upcoming
+    ? ` Nothing active right now, but an upcoming flyer has it for ` +
+        `${upcoming.price} at ${upcoming.store} starting ` +
+        `${formatWeekOf(upcoming.validFrom)}.`
+    : '';
+}
+
 // "2026-09-03" -> "Sep 3" — for naming the flyer week a price happened in.
 function formatWeekOf(iso) {
   if (!iso) {
@@ -568,12 +596,26 @@ app.post('/chat', express.json({limit: '32kb'}), async (req, res) => {
       const {products, pages, terms, must, total} = searchProductsExpanded(
         agent.terms,
         baseUrlOf(req),
-        {limit: 24, must: agent.must, broad: agent.scope === 'broad'},
+        {
+          limit: 24,
+          must: agent.must,
+          broad: agent.scope === 'broad',
+          includeExpired: agent.includeExpired,
+        },
       );
       const intent = agent.intent || terms[0] || 'that';
+      const expiredNote = agent.includeExpired ? ', including expired flyers' : '';
+      // A price comparison across mismatched broad-aisle results (e.g. "snacks")
+      // isn't meaningful, and expired-inclusive searches are about history, not
+      // "right now" — so only add it for a single-item, non-expired search.
+      const priceNote =
+        products.length && agent.scope === 'item' && !agent.includeExpired
+          ? cheapestPriceNote(products, todayIso())
+          : '';
       const reply = products.length
-        ? `Found ${total} match${total === 1 ? '' : 'es'} for "${intent}"` +
-          (total > products.length ? ` (showing ${products.length}).` : '.')
+        ? `Found ${total} match${total === 1 ? '' : 'es'} for "${intent}"${expiredNote}` +
+          (total > products.length ? ` (showing ${products.length}).` : '.') +
+          priceNote
         : `I couldn't find anything for "${intent}" in the flyers right now. ` +
           `I searched: ${terms.join(', ')}` +
           (must.length ? `, filtered to: ${must.join(', ')}` : '') +

@@ -1119,10 +1119,24 @@ If the user names a product or category, use action "search":
 - "scope": "item" for a specific thing ("milk" = milk to drink, not milk cake or chocolate bars). "broad" for an aisle/umbrella ("medication", "snacks", "baby products") or "what X products are there" / "anything with X".
 - "must": ONLY when the user restricts it ("for kids", "gluten free", "unsalted") — words a result must ALSO contain, expanded like terms; keep the earlier "terms". "for kids" -> ["child","children","childrens","infant","toddler","junior"]. Else [].
 - "intent": what they want, 1-4 words, no verbs — "grapes", "kids medication".
+- "includeExpired": false by default — search only shows currently active and
+  upcoming flyers, never expired ones, e.g. "cheapest corn right now" only
+  looks at what's active or coming up. Set true ONLY when the user explicitly
+  asks about past/historical/expired pricing or flyers — "what was corn last
+  month", "expired flyers for X", "what did milk used to cost".
+- Also use "search" (NOT "price_insight") for a plain "what's the
+  cheapest/lowest price on X" with no historical framing — "cheapest corn
+  right now", "lowest price on milk today", "what's the best price on
+  strawberries". The search results already exclude expired flyers and state
+  the cheapest current match automatically — you don't need to compute
+  anything.
 
 If the user asks whether a price is good, how a price compares to before, the
-lowest it's been, which store is cheapest, or how often something goes on
-sale — use action "price_insight":
+lowest it's EVER been / historically, which store is USUALLY/typically
+cheaper (a historical comparison, not just what's on sale today), or how
+often something goes on sale — use action "price_insight". This is for
+questions about the PAST or a TREND, never a plain "what's cheapest right
+now" (that's "search" — see above):
 - "productHint": the plain item, 1-4 words, no brand ("strawberries", "chicken breast").
 - "scope": "item" (default — almost always this) means the actual product —
   "tomatoes" means the produce itself, pooling every variety, never something
@@ -1130,7 +1144,7 @@ sale — use action "price_insight":
   ingredient-style ask — "what products have tomatoes in them", "anything
   with peanuts" — where a pasta sauce or a snack listing it as an ingredient
   should also count.
-- "insightType": "deal_quality" (is a price good — incl. "is $X a good price"), "lowest_price" (is THIS/the current price the lowest it's been recently — a yes/no), "when_lowest" (WHEN/what week was the price lowest, or "what's the lowest it's been"), "trend" (how has it changed), "store_compare" (which store is cheapest), or "sale_frequency" (how often it goes on sale). Pick the closest one.
+- "insightType": "deal_quality" (is a price good — incl. "is $X a good price"), "lowest_price" (is THIS/the current price the lowest it's been recently — a yes/no), "when_lowest" (WHEN/what week was the price lowest, or "what's the lowest it's been"), "trend" (how has it changed), "store_compare" (which store is USUALLY cheapest, historically), or "sale_frequency" (how often it goes on sale). Pick the closest one.
 - "targetPrice": the dollar amount they mentioned as a NUMBER (e.g. "$3.99" -> 3.99). 0 if none mentioned.
 
 If the user asks to be told/notified/alerted when something's price drops to
@@ -1142,7 +1156,7 @@ or below an amount, use action "set_alert":
 
 Otherwise use action "reply" (1-2 sentences). Don't answer general-knowledge questions — say you only help find and track flyer products.
 
-Fill every field; unused ones "" or [] or 0.`;
+Fill every field; unused ones "" or [] or 0 or false.`;
 
 const CHAT_SCHEMA = {
   type: 'OBJECT',
@@ -1152,6 +1166,7 @@ const CHAT_SCHEMA = {
     scope: {type: 'STRING', enum: ['item', 'broad']},
     must: {type: 'ARRAY', items: {type: 'STRING'}},
     intent: {type: 'STRING'},
+    includeExpired: {type: 'BOOLEAN'},
     productHint: {type: 'STRING'},
     insightType: {
       type: 'STRING',
@@ -1174,6 +1189,7 @@ const CHAT_SCHEMA = {
     'scope',
     'must',
     'intent',
+    'includeExpired',
     'productHint',
     'insightType',
     'targetPrice',
@@ -1228,7 +1244,7 @@ function cleanTerms(value) {
  * @param {Array<{ role: 'user'|'assistant', content: string }>} messages
  *   Trimmed recent history, ending with the new user turn.
  * @returns {Promise<
- *   | { kind: 'search', terms: string[], scope: 'item'|'broad', must: string[], intent: string, usage: object }
+ *   | { kind: 'search', terms: string[], scope: 'item'|'broad', must: string[], intent: string, includeExpired: boolean, usage: object }
  *   | { kind: 'price_insight', productHint: string, scope: 'item'|'broad', insightType: string, targetPrice: number|null, usage: object }
  *   | { kind: 'set_alert', productHint: string, targetPrice: number, comparison: 'lt'|'lte', usage: object }
  *   | { kind: 'reply', text: string, usage: object }
@@ -1249,6 +1265,7 @@ export async function chatAgent(messages) {
       scope: 'item',
       must: [],
       intent: lastUser.slice(0, 40),
+      includeExpired: false,
       usage: {mock: true},
     };
   }
@@ -1304,6 +1321,7 @@ export async function chatAgent(messages) {
       scope,
       must,
       intent: String(parsed.intent || '').slice(0, 60),
+      includeExpired: !!parsed.includeExpired,
       usage,
     };
   } else if (parsed.action === 'price_insight' && productHint) {
@@ -1336,7 +1354,8 @@ export async function chatAgent(messages) {
   const detail =
     result.kind === 'search'
       ? `  ${result.scope}  [${result.terms.join(', ')}]` +
-        (result.must.length ? `  must:[${result.must.join(', ')}]` : '')
+        (result.must.length ? `  must:[${result.must.join(', ')}]` : '') +
+        (result.includeExpired ? '  includeExpired' : '')
       : result.kind === 'price_insight'
       ? `  ${result.scope}  ${result.insightType}  "${result.productHint}"` +
         (result.targetPrice ? `  $${result.targetPrice}` : '')
@@ -1361,6 +1380,7 @@ export async function chatAgent(messages) {
     scope: result.kind === 'search' || result.kind === 'price_insight' ? result.scope : undefined,
     terms: result.kind === 'search' ? result.terms : [],
     must: result.kind === 'search' ? result.must : [],
+    includeExpired: result.kind === 'search' ? result.includeExpired : undefined,
     productHint: result.productHint,
     insightType: result.insightType,
     targetPrice: result.targetPrice,
