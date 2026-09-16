@@ -415,9 +415,12 @@ export type FilterFacets = {
   statuses: Facet[];
   /** How many of the (otherwise-filtered) products are on sale. */
   saleCount: number;
-  /** How many expired products match everything else selected — i.e. what
-   * turning on "include expired" would add. */
+  /** How many expired products match everything else selected — what
+   * "show expired only" would return. */
   expiredCount: number;
+  /** How many products "show expired with others" would return (the
+   * non-expired baseline plus expired). */
+  expiredIncludedCount: number;
   /** How many products the whole current selection returns. */
   total: number;
 };

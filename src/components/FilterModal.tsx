@@ -187,6 +187,12 @@ function FilterModal({
             <View style={styles.section}>
               {EXPIRED_MODE_OPTIONS.map(({mode, label}) => {
                 const on = expiredModeOf(draft) === mode;
+                const count =
+                  mode === 'include'
+                    ? shown.expiredIncludedCount ?? 0
+                    : mode === 'only'
+                    ? shown.expiredCount ?? 0
+                    : null;
                 return (
                   <Pressable
                     key={mode}
@@ -203,17 +209,17 @@ function FilterModal({
                       styles.row,
                       pressed && styles.rowPressed,
                     ]}>
-                    <View style={[styles.box, on && styles.boxOn]}>
-                      {on ? <View style={styles.tick} /> : null}
+                    <View style={[styles.radioBox, on && styles.radioBoxOn]}>
+                      {on ? <View style={styles.radioDot} /> : null}
                     </View>
                     <Text style={styles.rowLabel}>{label}</Text>
-                    {mode !== 'hide' ? (
+                    {count !== null ? (
                       <Text
                         style={[
                           styles.rowCount,
-                          (shown.expiredCount ?? 0) === 0 && styles.rowZero,
+                          count === 0 && styles.rowZero,
                         ]}>
-                        {shown.expiredCount ?? 0}
+                        {count}
                       </Text>
                     ) : null}
                   </Pressable>
@@ -247,7 +253,15 @@ function FilterModal({
               'Status',
               shown.statuses,
               draft.statuses,
-              v => setDraft(d => ({...d, statuses: toggle(d.statuses, v)})),
+              v =>
+                setDraft(d => ({
+                  ...d,
+                  statuses: toggle(d.statuses, v),
+                  // Picking a specific status while "expired only" is on
+                  // means the user wants that status too, not JUST expired.
+                  includeExpired: d.expiredOnly || d.includeExpired,
+                  expiredOnly: false,
+                })),
               v => STATUS_LABEL[v] ?? titleCase(v),
             )}
             {section(
@@ -370,6 +384,22 @@ const makeStyles = (c: Palette) =>
     },
     boxOn: {backgroundColor: c.primary, borderColor: c.primary},
     tick: {width: 8, height: 8, borderRadius: 2, backgroundColor: '#fff'},
+    radioBox: {
+      width: 20,
+      height: 20,
+      borderRadius: 10,
+      borderWidth: 1.5,
+      borderColor: c.border,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    radioBoxOn: {borderColor: c.primary},
+    radioDot: {
+      width: 10,
+      height: 10,
+      borderRadius: 5,
+      backgroundColor: c.primary,
+    },
     rowLabel: {flex: 1, fontSize: 15, color: c.text},
     rowCount: {
       fontSize: 13,

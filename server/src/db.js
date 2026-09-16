@@ -1486,6 +1486,16 @@ export function filterFacets({
     .prepare(`SELECT COUNT(*) AS n ${FROM} ${all.clause}`)
     .get(...all.params).n;
 
+  // How many non-expired products match the current status pick (or the
+  // default set, if untouched) — always excluding expired regardless of the
+  // includeExpired/expiredOnly toggles, so it's a stable baseline to add
+  // `expiredCount` onto below.
+  const nonExpiredCount = effectiveStatuses(statuses, false, false).reduce(
+    (sum, s) => sum + (byStatus.get(s) || 0),
+    0,
+  );
+  const expiredCount = byStatus.get('expired') || 0;
+
   return {
     departments: deptRows.map(r => ({value: r.value, count: r.n})),
     stores: storeRows.map(r => ({value: r.value, count: r.n})),
@@ -1497,9 +1507,13 @@ export function filterFacets({
       .sort()
       .filter(s => byStatus.get(s))
       .map(s => ({value: s, count: byStatus.get(s)})),
-    // how many expired products match everything else selected — i.e. what
-    // turning on "include expired" would add, not a replacement for the rest.
-    expiredCount: byStatus.get('expired') || 0,
+    // how many expired products match everything else selected — what
+    // "show expired only" would return.
+    expiredCount,
+    // how many products "show expired with others" would return — the
+    // non-expired baseline plus expired, never equal to `expiredCount`
+    // unless there are zero non-expired matches.
+    expiredIncludedCount: nonExpiredCount + expiredCount,
     saleCount,
     total,
   };

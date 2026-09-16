@@ -41,6 +41,7 @@ const NO_FACETS: FilterFacets = {
   statuses: [],
   saleCount: 0,
   expiredCount: 0,
+  expiredIncludedCount: 0,
   total: 0,
 };
 
