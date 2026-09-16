@@ -1154,14 +1154,30 @@ or below an amount, use action "set_alert":
   number, use action "reply" and ask them for one instead.
 - "comparison": "lt" if they said "under"/"below" a price, else "lte".
 
-Otherwise use action "reply" (1-2 sentences). Don't answer general-knowledge questions — say you only help find and track flyer products.
+If the user asks to see/check their current price alerts ("show my alerts",
+"what am I tracking", "do I have any alerts"), use action "list_alerts". No
+other fields are needed.
+
+If the user asks to cancel/remove/stop/delete a price alert, use action
+"cancel_alert":
+- "productHint": the item, same style as above — "" if they mean ALL of
+  their alerts ("cancel my alerts", "clear all my alerts") rather than one
+  specific product.
+
+Otherwise use action "reply" (1-2 sentences). Don't answer general-knowledge questions — say you only help find and track flyer products. Never claim to
+have done something (cancelled an alert, placed an order, changed a
+setting) unless a dedicated action above actually exists for it and you
+used it.
 
 Fill every field; unused ones "" or [] or 0 or false.`;
 
 const CHAT_SCHEMA = {
   type: 'OBJECT',
   properties: {
-    action: {type: 'STRING', enum: ['search', 'price_insight', 'set_alert', 'reply']},
+    action: {
+      type: 'STRING',
+      enum: ['search', 'price_insight', 'set_alert', 'list_alerts', 'cancel_alert', 'reply'],
+    },
     terms: {type: 'ARRAY', items: {type: 'STRING'}},
     scope: {type: 'STRING', enum: ['item', 'broad']},
     must: {type: 'ARRAY', items: {type: 'STRING'}},
@@ -1247,6 +1263,8 @@ function cleanTerms(value) {
  *   | { kind: 'search', terms: string[], scope: 'item'|'broad', must: string[], intent: string, includeExpired: boolean, usage: object }
  *   | { kind: 'price_insight', productHint: string, scope: 'item'|'broad', insightType: string, targetPrice: number|null, usage: object }
  *   | { kind: 'set_alert', productHint: string, targetPrice: number, comparison: 'lt'|'lte', usage: object }
+ *   | { kind: 'list_alerts', usage: object }
+ *   | { kind: 'cancel_alert', productHint: string, usage: object }
  *   | { kind: 'reply', text: string, usage: object }
  * >}
  */
@@ -1343,6 +1361,10 @@ export async function chatAgent(messages) {
       comparison: parsed.comparison === 'lt' ? 'lt' : 'lte',
       usage,
     };
+  } else if (parsed.action === 'list_alerts') {
+    result = {kind: 'list_alerts', usage};
+  } else if (parsed.action === 'cancel_alert') {
+    result = {kind: 'cancel_alert', productHint, usage};
   } else {
     result = {
       kind: 'reply',
@@ -1361,6 +1383,8 @@ export async function chatAgent(messages) {
         (result.targetPrice ? `  $${result.targetPrice}` : '')
       : result.kind === 'set_alert'
       ? `  "${result.productHint}" ${result.comparison} $${result.targetPrice}`
+      : result.kind === 'cancel_alert'
+      ? `  "${result.productHint || 'all'}"`
       : '';
 
   console.log(

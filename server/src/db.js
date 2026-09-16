@@ -307,6 +307,14 @@ const stmts = {
     `UPDATE price_alerts SET resolved_at = @resolved_at, resolved_product_id = @resolved_product_id
       WHERE id = @id`,
   ),
+  deleteOpenAlertsForUserProduct: db.prepare(
+    `DELETE FROM price_alerts
+      WHERE user_id = @user_id AND canonical_product_id = @canonical_product_id
+        AND resolved_at IS NULL`,
+  ),
+  deleteOpenAlertsForUser: db.prepare(
+    `DELETE FROM price_alerts WHERE user_id = @user_id AND resolved_at IS NULL`,
+  ),
 };
 
 export function findFlyerByHash(hash) {
@@ -907,6 +915,22 @@ export function listAlerts(userId) {
     resolvedAt: r.resolved_at || null,
     resolvedProductId: r.resolved_product_id || null,
   }));
+}
+
+/**
+ * Cancels (deletes) a user's still-open price alerts — a resolved/matched
+ * alert is left alone, since there's nothing left to "cancel". Pass
+ * `canonicalProductId` to cancel just that product's alerts, or omit it to
+ * cancel everything open for the user. Returns how many were removed.
+ */
+export function cancelAlerts({userId, canonicalProductId}) {
+  const result = canonicalProductId
+    ? stmts.deleteOpenAlertsForUserProduct.run({
+        user_id: userId,
+        canonical_product_id: canonicalProductId,
+      })
+    : stmts.deleteOpenAlertsForUser.run({user_id: userId});
+  return result.changes;
 }
 
 function safeJsonArray(s) {

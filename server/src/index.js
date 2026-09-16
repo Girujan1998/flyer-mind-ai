@@ -12,6 +12,7 @@ import {runCanonicalMatchingBatch} from './canonicalMatch.js';
 import {
   PAGES_DIR,
   THUMBS_DIR,
+  cancelAlerts,
   createAlert,
   departmentCounts,
   filterFacets,
@@ -490,6 +491,36 @@ function formatWeekOf(iso) {
     : d.toLocaleDateString('en-US', {month: 'short', day: 'numeric', timeZone: 'UTC'});
 }
 
+// Deterministic reply text for "list_alerts" — built straight from listAlerts()
+// rows, same rule as everywhere else: real data in, never a Gemini guess.
+function composeAlertsReply(alerts) {
+  if (!alerts.length) {
+    return "You don't have any price alerts set yet. Ask me to let you know " +
+      'when something drops below a price, like "tell me when milk drops below $4".';
+  }
+  const cmp = a => (a.comparison === 'lt' ? 'under' : 'at or under');
+  const open = alerts.filter(a => !a.resolvedAt);
+  const resolved = alerts.filter(a => a.resolvedAt);
+
+  const parts = [];
+  if (open.length) {
+    const list = open
+      .map(a => `${a.canonicalName} ${cmp(a)} $${a.targetPrice.toFixed(2)}`)
+      .join('; ');
+    parts.push(`Watching ${open.length} item${open.length === 1 ? '' : 's'}: ${list}.`);
+  }
+  if (resolved.length) {
+    const list = resolved
+      .slice(0, 3)
+      .map(a => `${a.canonicalName} (target was $${a.targetPrice.toFixed(2)})`)
+      .join('; ');
+    parts.push(
+      `Already matched: ${list}${resolved.length > 3 ? `, +${resolved.length - 3} more` : ''}.`,
+    );
+  }
+  return parts.join(' ');
+}
+
 // Deterministic reply text for a "price_insight" chat turn — every number in
 // here comes straight from priceInsight()'s SQL aggregates, never from Gemini,
 // so the agent can never state a price or trend it made up.
@@ -590,6 +621,18 @@ app.post('/chat', express.json({limit: '32kb'}), async (req, res) => {
       return res.status(400).json({error: 'messages must end with a user turn'});
     }
 
+    // A blank/whitespace-only turn has nothing for Gemini to classify — asking
+    // anyway just invites it to guess. Answer locally instead.
+    if (!messages[messages.length - 1].content.trim()) {
+      return res.json({
+        reply: "I didn't catch that — what product are you looking for, or what would you like to know?",
+        products: [],
+        pages: [],
+        terms: [],
+        must: [],
+      });
+    }
+
     const agent = await chatAgent(messages);
 
     if (agent.kind === 'search') {
@@ -681,6 +724,51 @@ app.post('/chat', express.json({limit: '32kb'}), async (req, res) => {
         terms: [],
         must: [],
       });
+    }
+
+    if (agent.kind === 'list_alerts') {
+      const userId = userIdOf(req);
+      const alerts = userId ? listAlerts(userId) : [];
+      return res.json({
+        reply: userId
+          ? composeAlertsReply(alerts)
+          : "I couldn't check your alerts — missing device id.",
+        products: [],
+        pages: [],
+        terms: [],
+        must: [],
+        alerts,
+      });
+    }
+
+    if (agent.kind === 'cancel_alert') {
+      const userId = userIdOf(req);
+      if (!userId) {
+        return res.json({
+          reply: "I couldn't cancel that — missing device id.",
+          products: [],
+          pages: [],
+          terms: [],
+          must: [],
+        });
+      }
+      // No product named -> cancel everything open; named but unrecognized ->
+      // nothing to cancel (never claim success for a product we can't match).
+      const canonicalId = agent.productHint
+        ? resolveCanonicalId(agent.productHint)
+        : null;
+      const count =
+        agent.productHint && !canonicalId
+          ? 0
+          : cancelAlerts({userId, canonicalProductId: canonicalId});
+      const reply = !count
+        ? agent.productHint
+          ? `You don't have any open alerts for "${agent.productHint}".`
+          : "You don't have any open alerts to cancel."
+        : agent.productHint
+        ? `Cancelled your alert for "${agent.productHint}".`
+        : `Cancelled all ${count} of your open alerts.`;
+      return res.json({reply, products: [], pages: [], terms: [], must: []});
     }
 
     return res.json({
