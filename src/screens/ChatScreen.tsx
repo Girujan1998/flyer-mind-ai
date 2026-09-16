@@ -17,6 +17,7 @@ import {
 
 import {
   AbortedError,
+  ChatProductGroup,
   ChatTurn,
   FlyerPage,
   NoServerError,
@@ -46,9 +47,7 @@ type ChatMessage = {
   id: string;
   role: 'user' | 'assistant';
   text: string;
-  products?: Product[];
-  terms?: string[];
-  must?: string[];
+  groups?: ChatProductGroup[];
   pending?: boolean;
   error?: boolean;
 };
@@ -62,6 +61,8 @@ const GREETING: ChatMessage = {
 let seq = 0;
 const uid = () => `m${Date.now().toString(36)}${(seq++).toString(36)}`;
 
+const titleCase = (s: string) => s.replace(/\b\w/g, c => c.toUpperCase());
+
 /**
  * Last 6 turns. Product replies collapse to a marker so the model never re-reads
  * card JSON, but the marker keeps the searched terms + any restriction so a
@@ -74,12 +75,17 @@ function buildHistory(all: ChatMessage[]): ChatTurn[] {
     .map(m => ({
       role: m.role,
       content:
-        m.role === 'assistant' && m.products?.length
-          ? `(showed ${m.products.length} products for: ${(m.terms ?? [])
-              .slice(0, 8)
-              .join(', ')}${
-              m.must?.length ? `; restricted to: ${m.must.join(', ')}` : ''
-            })`
+        m.role === 'assistant' && m.groups?.length
+          ? m.groups
+              .map(g => {
+                const must = g.must.length
+                  ? `; restricted to: ${g.must.join(', ')}`
+                  : '';
+                return `(showed ${g.products.length} products for: ${g.terms
+                  .slice(0, 8)
+                  .join(', ')}${must})`;
+              })
+              .join(' ')
           : m.text,
     }));
 }
@@ -247,9 +253,7 @@ function ChatScreen(): React.JSX.Element {
                 ...m,
                 pending: false,
                 text: res.reply,
-                products: res.products,
-                terms: res.terms,
-                must: res.must,
+                groups: res.groups,
               }
             : m,
         ),
@@ -327,12 +331,11 @@ function ChatScreen(): React.JSX.Element {
       );
     }
 
-    const products = item.products ?? [];
-    // 7+ matches: top FEATURED as cards, the tail behind a "+ N more" tap.
-    const split = products.length > FEATURED + 2;
-    const featured = split ? products.slice(0, FEATURED) : products;
-    const rest = split ? products.slice(FEATURED) : [];
-    const isOpen = expanded.has(item.id);
+    const groups = item.groups ?? [];
+    // Multiple distinct products ("tomatoes and chips") each get their own
+    // labeled section so results don't blur together; a single product
+    // keeps the plain, header-less layout this already had.
+    const showHeaders = groups.length > 1;
 
     return (
       <View style={styles.rowLeft}>
@@ -357,45 +360,69 @@ function ChatScreen(): React.JSX.Element {
           </View>
         )}
 
-        {featured.length ? (
-          <View style={styles.grid}>
-            {featured.map(p => (
-              <ProductCard
-                key={p.id}
-                product={p}
-                width={CARD_WIDTH}
-                onPress={setInfoProduct}
-              />
-            ))}
-          </View>
-        ) : null}
+        {groups.map((group, gi) => {
+          const products = group.products;
+          if (!products.length) {
+            return null;
+          }
+          // 7+ matches: top FEATURED as cards, the tail behind a "+ N more" tap.
+          const split = products.length > FEATURED + 2;
+          const featured = split ? products.slice(0, FEATURED) : products;
+          const rest = split ? products.slice(FEATURED) : [];
+          const groupKey = `${item.id}:${gi}`;
+          const isOpen = expanded.has(groupKey);
 
-        {rest.length ? (
-          isOpen ? (
-            <View style={styles.rows}>
-              {rest.map((p, i) => (
-                <ProductRow
-                  key={p.id}
-                  product={p}
-                  first={i === 0}
-                  onPress={setInfoProduct}
-                />
-              ))}
+          return (
+            <View key={groupKey} style={styles.group}>
+              {showHeaders ? (
+                <Text style={styles.groupHeader}>
+                  {titleCase(group.label)} ({group.total})
+                </Text>
+              ) : null}
+
+              <View style={styles.grid}>
+                {featured.map(p => (
+                  <ProductCard
+                    key={p.id}
+                    product={p}
+                    width={CARD_WIDTH}
+                    onPress={setInfoProduct}
+                  />
+                ))}
+              </View>
+
+              {rest.length ? (
+                isOpen ? (
+                  <View style={styles.rows}>
+                    {rest.map((p, i) => (
+                      <ProductRow
+                        key={p.id}
+                        product={p}
+                        first={i === 0}
+                        onPress={setInfoProduct}
+                      />
+                    ))}
+                  </View>
+                ) : (
+                  <Pressable
+                    onPress={() =>
+                      setExpanded(prev => new Set(prev).add(groupKey))
+                    }
+                    accessibilityRole="button"
+                    style={({pressed}) => [
+                      styles.moreBtn,
+                      pressed && styles.pressed,
+                    ]}>
+                    <Text style={styles.moreBtnText}>
+                      + {rest.length} more{' '}
+                      {rest.length === 1 ? 'match' : 'matches'}
+                    </Text>
+                  </Pressable>
+                )
+              ) : null}
             </View>
-          ) : (
-            <Pressable
-              onPress={() => setExpanded(prev => new Set(prev).add(item.id))}
-              accessibilityRole="button"
-              style={({pressed}) => [
-                styles.moreBtn,
-                pressed && styles.pressed,
-              ]}>
-              <Text style={styles.moreBtnText}>
-                + {rest.length} more {rest.length === 1 ? 'match' : 'matches'}
-              </Text>
-            </Pressable>
-          )
-        ) : null}
+          );
+        })}
       </View>
     );
   };
@@ -567,6 +594,16 @@ const makeStyles = (c: Palette) =>
       borderColor: c.danger,
     },
     bubbleErrorText: {color: c.danger},
+
+    group: {alignSelf: 'stretch', gap: spacing.sm},
+    groupHeader: {
+      color: c.text,
+      fontFamily: fonts.semibold,
+      fontSize: 13,
+      fontWeight: '600',
+      textTransform: 'uppercase',
+      letterSpacing: 0.4,
+    },
 
     grid: {
       flexDirection: 'row',

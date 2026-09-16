@@ -480,6 +480,34 @@ function cheapestPriceNote(products, today) {
     : '';
 }
 
+// Runs one product group's search (a "search" chat turn covers 1+ of these,
+// e.g. "tomatoes" and "chips" for "price of tomatoes and chips") and composes
+// that group's own reply sentence, reusing the same rules as a single-product
+// search: only state a cheapest-price note for an "item"-scope, non-expired
+// group, since a "broad" aisle group spans unrelated products.
+function runSearchGroup(group, baseUrl, includeExpired, limit) {
+  const {products, pages, terms, must, total} = searchProductsExpanded(
+    group.terms,
+    baseUrl,
+    {limit, must: group.must, broad: group.scope === 'broad', includeExpired},
+  );
+  const label = group.intent || terms[0] || 'that';
+  const expiredNote = includeExpired ? ', including expired flyers' : '';
+  const priceNote =
+    products.length && group.scope === 'item' && !includeExpired
+      ? cheapestPriceNote(products, todayIso())
+      : '';
+  const reply = products.length
+    ? `Found ${total} match${total === 1 ? '' : 'es'} for "${label}"${expiredNote}` +
+      (total > products.length ? ` (showing ${products.length}).` : '.') +
+      priceNote
+    : `I couldn't find anything for "${label}" in the flyers right now.` +
+      (terms.length ? ` I searched: ${terms.join(', ')}` : '') +
+      (must.length ? `, filtered to: ${must.join(', ')}` : '') +
+      '.';
+  return {label, products, pages, terms, must, total, reply};
+}
+
 // "2026-09-03" -> "Sep 3" — for naming the flyer week a price happened in.
 function formatWeekOf(iso) {
   if (!iso) {
@@ -601,10 +629,12 @@ function composePriceInsightReply(agent, insight) {
 
 /**
  * POST /chat  { messages: [{ role: 'user'|'assistant', content }] }
- *   -> { reply, products: [...], pages: [...], terms: [...] }
+ *   -> { reply, groups: [{label, products, terms, must, total}], pages: [...] }
  *
  * The Chat-tab agent. One Gemini call turns the latest user turn into a
- * search, a price question, a new price alert, or a short reply.
+ * search (one group per distinct product asked about — "tomatoes and
+ * chips" is two groups), a price question, a new price alert, or a short
+ * reply. Non-search turns return `groups: []`.
  */
 app.post('/chat', express.json({limit: '32kb'}), async (req, res) => {
   try {
@@ -626,44 +656,47 @@ app.post('/chat', express.json({limit: '32kb'}), async (req, res) => {
     if (!messages[messages.length - 1].content.trim()) {
       return res.json({
         reply: "I didn't catch that — what product are you looking for, or what would you like to know?",
-        products: [],
+        groups: [],
         pages: [],
-        terms: [],
-        must: [],
       });
     }
 
     const agent = await chatAgent(messages);
 
     if (agent.kind === 'search') {
-      const {products, pages, terms, must, total} = searchProductsExpanded(
-        agent.terms,
-        baseUrlOf(req),
-        {
-          limit: 24,
-          must: agent.must,
-          broad: agent.scope === 'broad',
-          includeExpired: agent.includeExpired,
-        },
+      const baseUrl = baseUrlOf(req);
+      // Multiple distinct products share the 24-item budget so a "tomatoes
+      // and chips" ask doesn't return 24 of each.
+      const limit =
+        agent.groups.length > 1 ? Math.max(6, Math.floor(24 / agent.groups.length)) : 24;
+      const results = agent.groups.map(g =>
+        runSearchGroup(g, baseUrl, agent.includeExpired, limit),
       );
-      const intent = agent.intent || terms[0] || 'that';
-      const expiredNote = agent.includeExpired ? ', including expired flyers' : '';
-      // A price comparison across mismatched broad-aisle results (e.g. "snacks")
-      // isn't meaningful, and expired-inclusive searches are about history, not
-      // "right now" — so only add it for a single-item, non-expired search.
-      const priceNote =
-        products.length && agent.scope === 'item' && !agent.includeExpired
-          ? cheapestPriceNote(products, todayIso())
-          : '';
-      const reply = products.length
-        ? `Found ${total} match${total === 1 ? '' : 'es'} for "${intent}"${expiredNote}` +
-          (total > products.length ? ` (showing ${products.length}).` : '.') +
-          priceNote
-        : `I couldn't find anything for "${intent}" in the flyers right now. ` +
-          `I searched: ${terms.join(', ')}` +
-          (must.length ? `, filtered to: ${must.join(', ')}` : '') +
-          '.';
-      return res.json({reply, products, pages, terms, must});
+
+      const pages = [];
+      const seenPages = new Set();
+      for (const r of results) {
+        for (const p of r.pages) {
+          const key = `${p.flyerId}:${p.page}`;
+          if (seenPages.has(key)) {
+            continue;
+          }
+          seenPages.add(key);
+          pages.push(p);
+        }
+      }
+
+      return res.json({
+        reply: results.map(r => r.reply).join('\n\n'),
+        groups: results.map(({label, products, terms, must, total}) => ({
+          label,
+          products,
+          terms,
+          must,
+          total,
+        })),
+        pages,
+      });
     }
 
     if (agent.kind === 'price_insight') {
@@ -680,10 +713,8 @@ app.post('/chat', express.json({limit: '32kb'}), async (req, res) => {
         : `I don't have enough price history for "${agent.productHint}" yet — it needs to show up in a couple of flyers first.`;
       return res.json({
         reply,
-        products: [],
+        groups: [],
         pages: [],
-        terms: [],
-        must: [],
         priceInsight: insight,
       });
     }
@@ -693,20 +724,16 @@ app.post('/chat', express.json({limit: '32kb'}), async (req, res) => {
       if (!canonicalId) {
         return res.json({
           reply: `I don't recognize "${agent.productHint}" yet — try again once it's shown up in a flyer.`,
-          products: [],
+          groups: [],
           pages: [],
-          terms: [],
-          must: [],
         });
       }
       const userId = userIdOf(req);
       if (!userId) {
         return res.json({
           reply: `I couldn't set that alert — missing device id.`,
-          products: [],
+          groups: [],
           pages: [],
-          terms: [],
-          must: [],
         });
       }
       getOrCreateUser(userId);
@@ -719,10 +746,8 @@ app.post('/chat', express.json({limit: '32kb'}), async (req, res) => {
       const cmp = agent.comparison === 'lt' ? 'under' : 'at or under';
       return res.json({
         reply: `Got it — I'll let you know when ${agent.productHint} drops ${cmp} $${agent.targetPrice.toFixed(2)}.`,
-        products: [],
+        groups: [],
         pages: [],
-        terms: [],
-        must: [],
       });
     }
 
@@ -733,10 +758,8 @@ app.post('/chat', express.json({limit: '32kb'}), async (req, res) => {
         reply: userId
           ? composeAlertsReply(alerts)
           : "I couldn't check your alerts — missing device id.",
-        products: [],
+        groups: [],
         pages: [],
-        terms: [],
-        must: [],
         alerts,
       });
     }
@@ -746,10 +769,8 @@ app.post('/chat', express.json({limit: '32kb'}), async (req, res) => {
       if (!userId) {
         return res.json({
           reply: "I couldn't cancel that — missing device id.",
-          products: [],
+          groups: [],
           pages: [],
-          terms: [],
-          must: [],
         });
       }
       // No product named -> cancel everything open; named but unrecognized ->
@@ -768,15 +789,13 @@ app.post('/chat', express.json({limit: '32kb'}), async (req, res) => {
         : agent.productHint
         ? `Cancelled your alert for "${agent.productHint}".`
         : `Cancelled all ${count} of your open alerts.`;
-      return res.json({reply, products: [], pages: [], terms: [], must: []});
+      return res.json({reply, groups: [], pages: []});
     }
 
     return res.json({
       reply: agent.text,
-      products: [],
+      groups: [],
       pages: [],
-      terms: [],
-      must: [],
     });
   } catch (err) {
     console.error('[chat] failed:', err);

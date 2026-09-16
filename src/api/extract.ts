@@ -169,14 +169,27 @@ export function extractFlyer(
 
 export type ChatRole = 'user' | 'assistant';
 export type ChatTurn = {role: ChatRole; content: string};
-export type ChatResponse = {
-  reply: string;
+
+/** One product's results within a "search" chat reply — "tomatoes and chips"
+ * comes back as two of these, so the UI can section them instead of mixing
+ * both products into one list. */
+export type ChatProductGroup = {
+  /** Display label for the section header, e.g. "tomatoes". */
+  label: string;
   products: Product[];
-  pages: FlyerPage[];
-  /** The expansion terms the agent actually searched; [] for a plain reply. */
+  /** The expansion terms actually searched for this product. */
   terms: string[];
   /** Restriction words a follow-up added (e.g. child / gluten free); [] if none. */
   must: string[];
+  /** Total matches for this product — may exceed `products.length`. */
+  total: number;
+};
+
+export type ChatResponse = {
+  reply: string;
+  /** [] for anything that isn't a product search (price question, alert, etc). */
+  groups: ChatProductGroup[];
+  pages: FlyerPage[];
   /** Present only for a price-question reply — the numbers behind it. */
   priceInsight?: PriceInsight | null;
 };

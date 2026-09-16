@@ -1130,6 +1130,15 @@ If the user names a product or category, use action "search":
   strawberries". The search results already exclude expired flyers and state
   the cheapest current match automatically — you don't need to compute
   anything.
+- "additionalProducts": when the user names MULTIPLE DISTINCT products in one
+  message ("price of tomatoes and chips", "do you have milk, eggs, and
+  bread") — put the FIRST product in terms/scope/must/intent as usual, then
+  one entry here per EXTRA product, each shaped exactly like
+  {terms, scope, must, intent} above. Max 3 extra (4 products total — pick
+  the first 4 named if there are more). Do NOT split one product's own
+  varieties/synonyms into separate entries ("roma or beefsteak tomatoes" is
+  still ONE product); only genuinely different items each get their own
+  entry. [] when there's only one product.
 
 If the user asks whether a price is good, how a price compares to before, the
 lowest it's EVER been / historically, which store is USUALLY/typically
@@ -1171,6 +1180,19 @@ used it.
 
 Fill every field; unused ones "" or [] or 0 or false.`;
 
+// One extra product in a multi-product search ("...and chips") — same shape
+// as the primary terms/scope/must/intent fields on CHAT_SCHEMA itself.
+const PRODUCT_GROUP_SCHEMA = {
+  type: 'OBJECT',
+  properties: {
+    terms: {type: 'ARRAY', items: {type: 'STRING'}},
+    scope: {type: 'STRING', enum: ['item', 'broad']},
+    must: {type: 'ARRAY', items: {type: 'STRING'}},
+    intent: {type: 'STRING'},
+  },
+  required: ['terms', 'scope', 'must', 'intent'],
+};
+
 const CHAT_SCHEMA = {
   type: 'OBJECT',
   properties: {
@@ -1182,6 +1204,7 @@ const CHAT_SCHEMA = {
     scope: {type: 'STRING', enum: ['item', 'broad']},
     must: {type: 'ARRAY', items: {type: 'STRING'}},
     intent: {type: 'STRING'},
+    additionalProducts: {type: 'ARRAY', items: PRODUCT_GROUP_SCHEMA},
     includeExpired: {type: 'BOOLEAN'},
     productHint: {type: 'STRING'},
     insightType: {
@@ -1205,6 +1228,7 @@ const CHAT_SCHEMA = {
     'scope',
     'must',
     'intent',
+    'additionalProducts',
     'includeExpired',
     'productHint',
     'insightType',
@@ -1256,11 +1280,26 @@ function cleanTerms(value) {
   return out;
 }
 
+/** One `additionalProducts` entry -> a clean product group, or null if it has
+ * no usable search terms (dropped rather than searched as empty). */
+function cleanProductGroup(raw) {
+  const terms = cleanTerms(raw?.terms);
+  if (!terms.length) {
+    return null;
+  }
+  return {
+    terms,
+    scope: raw?.scope === 'broad' ? 'broad' : 'item',
+    must: cleanTerms(raw?.must),
+    intent: String(raw?.intent || '').trim().slice(0, 60),
+  };
+}
+
 /**
  * @param {Array<{ role: 'user'|'assistant', content: string }>} messages
  *   Trimmed recent history, ending with the new user turn.
  * @returns {Promise<
- *   | { kind: 'search', terms: string[], scope: 'item'|'broad', must: string[], intent: string, includeExpired: boolean, usage: object }
+ *   | { kind: 'search', groups: {terms: string[], scope: 'item'|'broad', must: string[], intent: string}[], includeExpired: boolean, usage: object }
  *   | { kind: 'price_insight', productHint: string, scope: 'item'|'broad', insightType: string, targetPrice: number|null, usage: object }
  *   | { kind: 'set_alert', productHint: string, targetPrice: number, comparison: 'lt'|'lte', usage: object }
  *   | { kind: 'list_alerts', usage: object }
@@ -1274,15 +1313,19 @@ export async function chatAgent(messages) {
   if (process.env.GEMINI_API_KEY === 'MOCK') {
     return {
       kind: 'search',
-      terms: cleanTerms(
-        lastUser
-          .toLowerCase()
-          .split(/\s+/)
-          .filter(w => w.length > 2),
-      ),
-      scope: 'item',
-      must: [],
-      intent: lastUser.slice(0, 40),
+      groups: [
+        {
+          terms: cleanTerms(
+            lastUser
+              .toLowerCase()
+              .split(/\s+/)
+              .filter(w => w.length > 2),
+          ),
+          scope: 'item',
+          must: [],
+          intent: lastUser.slice(0, 40),
+        },
+      ],
       includeExpired: false,
       usage: {mock: true},
     };
@@ -1333,12 +1376,15 @@ export async function chatAgent(messages) {
 
   let result;
   if (parsed.action === 'search' && terms.length) {
+    const extraGroups = Array.isArray(parsed.additionalProducts)
+      ? parsed.additionalProducts.slice(0, 3).map(cleanProductGroup).filter(Boolean)
+      : [];
     result = {
       kind: 'search',
-      terms,
-      scope,
-      must,
-      intent: String(parsed.intent || '').slice(0, 60),
+      groups: [
+        {terms, scope, must, intent: String(parsed.intent || '').slice(0, 60)},
+        ...extraGroups,
+      ],
       includeExpired: !!parsed.includeExpired,
       usage,
     };
@@ -1375,9 +1421,13 @@ export async function chatAgent(messages) {
 
   const detail =
     result.kind === 'search'
-      ? `  ${result.scope}  [${result.terms.join(', ')}]` +
-        (result.must.length ? `  must:[${result.must.join(', ')}]` : '') +
-        (result.includeExpired ? '  includeExpired' : '')
+      ? result.groups
+          .map(
+            g =>
+              `  ${g.scope}  [${g.terms.join(', ')}]` +
+              (g.must.length ? `  must:[${g.must.join(', ')}]` : ''),
+          )
+          .join('  +') + (result.includeExpired ? '  includeExpired' : '')
       : result.kind === 'price_insight'
       ? `  ${result.scope}  ${result.insightType}  "${result.productHint}"` +
         (result.targetPrice ? `  $${result.targetPrice}` : '')
@@ -1401,9 +1451,10 @@ export async function chatAgent(messages) {
     model,
     turns: messages.length,
     kind: result.kind,
-    scope: result.kind === 'search' || result.kind === 'price_insight' ? result.scope : undefined,
-    terms: result.kind === 'search' ? result.terms : [],
-    must: result.kind === 'search' ? result.must : [],
+    scope: result.kind === 'price_insight' ? result.scope : undefined,
+    groupCount: result.kind === 'search' ? result.groups.length : undefined,
+    terms: result.kind === 'search' ? result.groups.flatMap(g => g.terms) : [],
+    must: result.kind === 'search' ? result.groups.flatMap(g => g.must) : [],
     includeExpired: result.kind === 'search' ? result.includeExpired : undefined,
     productHint: result.productHint,
     insightType: result.insightType,
