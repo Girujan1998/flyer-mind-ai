@@ -41,6 +41,21 @@ function toggle(list: string[], v: string): string[] {
   return list.includes(v) ? list.filter(x => x !== v) : [...list, v];
 }
 
+type ExpiredMode = 'hide' | 'include' | 'only';
+
+const EXPIRED_MODE_OPTIONS: {mode: ExpiredMode; label: string}[] = [
+  {mode: 'hide', label: 'Hide expired products'},
+  {mode: 'include', label: 'Show expired products with others'},
+  {mode: 'only', label: 'Show expired products only'},
+];
+
+function expiredModeOf(f: ProductFilters): ExpiredMode {
+  if (f.expiredOnly) {
+    return 'only';
+  }
+  return f.includeExpired ? 'include' : 'hide';
+}
+
 function FilterModal({
   visible,
   facets,
@@ -162,37 +177,48 @@ function FilterModal({
 
           <Text style={styles.hint}>
             Leave a section untouched to include everything in it — except
-            expired flyers, which are hidden by default. Turn on "Show expired
-            products" above to include them too.
+            expired flyers, which are hidden by default. Pick how you'd like to
+            see them above the other sections.
           </Text>
 
           <ScrollView
             style={styles.body}
             contentContainerStyle={styles.bodyContent}>
             <View style={styles.section}>
-              <Pressable
-                onPress={() =>
-                  setDraft(d => ({...d, includeExpired: !d.includeExpired}))
-                }
-                accessibilityRole="checkbox"
-                accessibilityState={{checked: draft.includeExpired}}
-                style={({pressed}) => [
-                  styles.row,
-                  pressed && styles.rowPressed,
-                ]}>
-                <View
-                  style={[styles.box, draft.includeExpired && styles.boxOn]}>
-                  {draft.includeExpired ? <View style={styles.tick} /> : null}
-                </View>
-                <Text style={styles.rowLabel}>Show expired products</Text>
-                <Text
-                  style={[
-                    styles.rowCount,
-                    (shown.expiredCount ?? 0) === 0 && styles.rowZero,
-                  ]}>
-                  {shown.expiredCount ?? 0}
-                </Text>
-              </Pressable>
+              {EXPIRED_MODE_OPTIONS.map(({mode, label}) => {
+                const on = expiredModeOf(draft) === mode;
+                return (
+                  <Pressable
+                    key={mode}
+                    onPress={() =>
+                      setDraft(d => ({
+                        ...d,
+                        includeExpired: mode === 'include',
+                        expiredOnly: mode === 'only',
+                      }))
+                    }
+                    accessibilityRole="radio"
+                    accessibilityState={{checked: on}}
+                    style={({pressed}) => [
+                      styles.row,
+                      pressed && styles.rowPressed,
+                    ]}>
+                    <View style={[styles.box, on && styles.boxOn]}>
+                      {on ? <View style={styles.tick} /> : null}
+                    </View>
+                    <Text style={styles.rowLabel}>{label}</Text>
+                    {mode !== 'hide' ? (
+                      <Text
+                        style={[
+                          styles.rowCount,
+                          (shown.expiredCount ?? 0) === 0 && styles.rowZero,
+                        ]}>
+                        {shown.expiredCount ?? 0}
+                      </Text>
+                    ) : null}
+                  </Pressable>
+                );
+              })}
             </View>
             <View style={styles.section}>
               <Text style={styles.sectionTitle}>Offer</Text>

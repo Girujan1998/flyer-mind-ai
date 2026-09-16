@@ -341,13 +341,15 @@ export type ProductFilters = {
   departments: string[];
   stores: string[];
   /** Active/upcoming/no-dates statuses to narrow to. Never includes 'expired'
-   * — expired flyers are folded in via `includeExpired` instead, alongside
-   * whatever else is selected, rather than as a narrow-to-expired-only pick. */
+   * — expired flyers are folded in via `includeExpired`/`expiredOnly`
+   * instead, not as one more entry in this allowlist. */
   statuses: string[];
   /** Show only products the flyer explicitly frames as a deal. */
   onSale: boolean;
   /** Also show expired flyers, in addition to everything else selected. */
   includeExpired: boolean;
+  /** Show ONLY expired flyers, overriding everything else in this filter. */
+  expiredOnly: boolean;
 };
 
 export const EMPTY_FILTERS: ProductFilters = {
@@ -356,6 +358,7 @@ export const EMPTY_FILTERS: ProductFilters = {
   statuses: [],
   onSale: false,
   includeExpired: false,
+  expiredOnly: false,
 };
 
 export function countActiveFilters(f: ProductFilters): number {
@@ -364,7 +367,8 @@ export function countActiveFilters(f: ProductFilters): number {
     f.stores.length +
     f.statuses.length +
     (f.onSale ? 1 : 0) +
-    (f.includeExpired ? 1 : 0)
+    (f.includeExpired ? 1 : 0) +
+    (f.expiredOnly ? 1 : 0)
   );
 }
 
@@ -378,6 +382,7 @@ function filtersToQuery(f: ProductFilters): string[] {
     csv('status', f.statuses),
     f.onSale ? 'sale=1' : '',
     f.includeExpired ? 'expired=1' : '',
+    f.expiredOnly ? 'expiredOnly=1' : '',
   ];
 }
 
