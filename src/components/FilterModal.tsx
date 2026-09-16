@@ -187,6 +187,9 @@ function FilterModal({
             <View style={styles.section}>
               {EXPIRED_MODE_OPTIONS.map(({mode, label}) => {
                 const on = expiredModeOf(draft) === mode;
+                // "Only" doesn't make sense once a specific status is picked
+                // — it would either be ignored or silently drop that status.
+                const disabled = mode === 'only' && draft.statuses.length > 0;
                 const count =
                   mode === 'include'
                     ? shown.expiredIncludedCount ?? 0
@@ -196,6 +199,7 @@ function FilterModal({
                 return (
                   <Pressable
                     key={mode}
+                    disabled={disabled}
                     onPress={() =>
                       setDraft(d => ({
                         ...d,
@@ -204,10 +208,11 @@ function FilterModal({
                       }))
                     }
                     accessibilityRole="radio"
-                    accessibilityState={{checked: on}}
+                    accessibilityState={{checked: on, disabled}}
                     style={({pressed}) => [
                       styles.row,
                       pressed && styles.rowPressed,
+                      disabled && styles.rowDisabled,
                     ]}>
                     <View style={[styles.radioBox, on && styles.radioBoxOn]}>
                       {on ? <View style={styles.radioDot} /> : null}
@@ -407,6 +412,7 @@ const makeStyles = (c: Palette) =>
       fontVariant: ['tabular-nums'],
     },
     rowZero: {opacity: 0.4},
+    rowDisabled: {opacity: 0.4},
     footer: {
       flexDirection: 'row',
       gap: spacing.sm,
