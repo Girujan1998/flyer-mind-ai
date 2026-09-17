@@ -1317,17 +1317,27 @@ function cleanStores(value) {
   ].slice(0, 5);
 }
 
+// A store's own name is never a real product search term — if the model
+// ever slips one into "terms"/"must" (it's told not to; that's a separate
+// field), a "broad"-scope wordmatch would match it against ANY product
+// whose NAME happens to embed the store's own name, e.g. a "Walmart
+// Travel" or "Walmart Rewards Mastercard" service tile turning up for a
+// completely unrelated "meat at Walmart" search.
+function stripStoreTerms(terms, storeNamesLower) {
+  return terms.filter(t => !storeNamesLower.has(t));
+}
+
 /** One `additionalProducts` entry -> a clean product group, or null if it has
  * no usable search terms (dropped rather than searched as empty). */
-function cleanProductGroup(raw) {
-  const terms = cleanTerms(raw?.terms);
+function cleanProductGroup(raw, storeNamesLower) {
+  const terms = stripStoreTerms(cleanTerms(raw?.terms), storeNamesLower);
   if (!terms.length) {
     return null;
   }
   return {
     terms,
     scope: raw?.scope === 'broad' ? 'broad' : 'item',
-    must: cleanTerms(raw?.must),
+    must: stripStoreTerms(cleanTerms(raw?.must), storeNamesLower),
     stores: cleanStores(raw?.stores),
     intent: String(raw?.intent || '').trim().slice(0, 60),
   };
@@ -1371,6 +1381,8 @@ export async function chatAgent(messages) {
   }
 
   const {apiKey, model} = config();
+  const knownStores = distinctStores();
+  const storeNamesLower = new Set(knownStores.map(s => s.toLowerCase()));
 
   const contents = messages.map(m => ({
     role: m.role === 'assistant' ? 'model' : 'user',
@@ -1379,7 +1391,7 @@ export async function chatAgent(messages) {
 
   const json = await callGemini(
     {
-      systemInstruction: {parts: [{text: chatSystemPrompt(distinctStores())}]},
+      systemInstruction: {parts: [{text: chatSystemPrompt(knownStores)}]},
       contents,
       generationConfig: {
         temperature: 0,
@@ -1404,8 +1416,8 @@ export async function chatAgent(messages) {
     // truncated / non-JSON — fall through to the generic reply
   }
 
-  const terms = cleanTerms(parsed.terms);
-  const must = cleanTerms(parsed.must);
+  const terms = stripStoreTerms(cleanTerms(parsed.terms), storeNamesLower);
+  const must = stripStoreTerms(cleanTerms(parsed.must), storeNamesLower);
   const stores = cleanStores(parsed.stores);
   const scope = parsed.scope === 'broad' ? 'broad' : 'item';
   const productHint = String(parsed.productHint || '').trim().slice(0, 60);
@@ -1417,7 +1429,10 @@ export async function chatAgent(messages) {
   let result;
   if (parsed.action === 'search' && terms.length) {
     const extraGroups = Array.isArray(parsed.additionalProducts)
-      ? parsed.additionalProducts.slice(0, 3).map(cleanProductGroup).filter(Boolean)
+      ? parsed.additionalProducts
+          .slice(0, 3)
+          .map(g => cleanProductGroup(g, storeNamesLower))
+          .filter(Boolean)
       : [];
     result = {
       kind: 'search',
