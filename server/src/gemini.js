@@ -7,6 +7,7 @@ import {dirname, join} from 'node:path';
 import {fileURLToPath} from 'node:url';
 
 import {DEPARTMENTS, cleanDepartment} from './departments.js';
+import {distinctStores} from './db.js';
 import {normalizeStore} from './stores.js';
 
 const API_BASE = 'https://generativelanguage.googleapis.com/v1beta/models';
@@ -1112,12 +1113,21 @@ export async function assignDepartments(items) {
 // structured object and the server acts on it directly.
 // ---------------------------------------------------------------------------
 
-const CHAT_SYSTEM = `You are the shopping assistant in a grocery-flyer app. Users search products from local flyers, and can ask about prices.
+function chatSystemPrompt(knownStores) {
+  const storeList = knownStores.length ? knownStores.join(', ') : '(none yet)';
+  return `You are the shopping assistant in a grocery-flyer app. Users search products from local flyers, and can ask about prices.
 
 If the user names a product or category, use action "search":
 - "terms": lowercase search words. START with the plain noun alone ("salmon", "tomato", "milk"), THEN add singular/plural, varieties written in full ("roma tomato", "atlantic salmon"), close synonyms, 2-4 flyer brands. For scope "broad" ALSO add the aisle/category word ("pain relief" for medication); for scope "item" never the parent category ("fish", "meat", "cheese", "produce"). Max 8, <=3 words each.
 - "scope": "item" for a specific thing ("milk" = milk to drink, not milk cake or chocolate bars). "broad" for an aisle/umbrella ("medication", "snacks", "baby products") or "what X products are there" / "anything with X".
 - "must": ONLY when the user restricts it ("for kids", "gluten free", "unsalted") — words a result must ALSO contain, expanded like terms; keep the earlier "terms". "for kids" -> ["child","children","childrens","infant","toddler","junior"]. Else [].
+- "stores": ONLY when the user names specific store(s) to search at ("at No
+  Frills", "at Walmart and Costco") — this LIMITS results to ONLY those
+  stores. Match each name to its correctly-spelled form from KNOWN STORES
+  below, fixing obvious typos/casing ("No Frolls" -> "No Frills", "walmart"
+  -> "Walmart") — pass through as typed if it's not a close match to any of
+  them. One or more is fine. Never invent a store the user didn't name. []
+  if none was named.
 - "intent": what they want, 1-4 words, no verbs — "grapes", "kids medication".
 - "includeExpired": false by default — search only shows currently active and
   upcoming flyers, never expired ones, e.g. "cheapest corn right now" only
@@ -1132,13 +1142,18 @@ If the user names a product or category, use action "search":
   anything.
 - "additionalProducts": when the user names MULTIPLE DISTINCT products in one
   message ("price of tomatoes and chips", "do you have milk, eggs, and
-  bread") — put the FIRST product in terms/scope/must/intent as usual, then
-  one entry here per EXTRA product, each shaped exactly like
-  {terms, scope, must, intent} above. Max 3 extra (4 products total — pick
-  the first 4 named if there are more). Do NOT split one product's own
-  varieties/synonyms into separate entries ("roma or beefsteak tomatoes" is
-  still ONE product); only genuinely different items each get their own
-  entry. [] when there's only one product.
+  bread") — put the FIRST product in terms/scope/must/stores/intent as
+  usual, then one entry here per EXTRA product, each shaped exactly like
+  {terms, scope, must, stores, intent} above. Max 3 extra (4 products total
+  — pick the first 4 named if there are more). Do NOT split one product's
+  own varieties/synonyms into separate entries ("roma or beefsteak
+  tomatoes" is still ONE product); only genuinely different items each get
+  their own entry. [] when there's only one product. If a store applies to
+  EVERY product in the message ("chips at No Frills and Walmart"), repeat
+  it in every entry's own "stores" field — there's no inheritance from the
+  first product.
+
+KNOWN STORES: ${storeList}
 
 If the user asks whether a price is good, how a price compares to before, the
 lowest it's EVER been / historically, which store is USUALLY/typically
@@ -1179,18 +1194,20 @@ setting) unless a dedicated action above actually exists for it and you
 used it.
 
 Fill every field; unused ones "" or [] or 0 or false.`;
+}
 
 // One extra product in a multi-product search ("...and chips") — same shape
-// as the primary terms/scope/must/intent fields on CHAT_SCHEMA itself.
+// as the primary terms/scope/must/stores/intent fields on CHAT_SCHEMA itself.
 const PRODUCT_GROUP_SCHEMA = {
   type: 'OBJECT',
   properties: {
     terms: {type: 'ARRAY', items: {type: 'STRING'}},
     scope: {type: 'STRING', enum: ['item', 'broad']},
     must: {type: 'ARRAY', items: {type: 'STRING'}},
+    stores: {type: 'ARRAY', items: {type: 'STRING'}},
     intent: {type: 'STRING'},
   },
-  required: ['terms', 'scope', 'must', 'intent'],
+  required: ['terms', 'scope', 'must', 'stores', 'intent'],
 };
 
 const CHAT_SCHEMA = {
@@ -1203,6 +1220,7 @@ const CHAT_SCHEMA = {
     terms: {type: 'ARRAY', items: {type: 'STRING'}},
     scope: {type: 'STRING', enum: ['item', 'broad']},
     must: {type: 'ARRAY', items: {type: 'STRING'}},
+    stores: {type: 'ARRAY', items: {type: 'STRING'}},
     intent: {type: 'STRING'},
     additionalProducts: {type: 'ARRAY', items: PRODUCT_GROUP_SCHEMA},
     includeExpired: {type: 'BOOLEAN'},
@@ -1227,6 +1245,7 @@ const CHAT_SCHEMA = {
     'terms',
     'scope',
     'must',
+    'stores',
     'intent',
     'additionalProducts',
     'includeExpired',
@@ -1280,6 +1299,24 @@ function cleanTerms(value) {
   return out;
 }
 
+// Runs whatever store name(s) Gemini gave back through the same
+// casing/spacing canonicalization applied at flyer ingestion, so "walmart"
+// or "Wal-Mart" match the exact `flyers.store` value regardless of how the
+// model happened to spell it. Doesn't invent matches for genuine typos —
+// that correction is the model's job (it's given the real store list).
+function cleanStores(value) {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return [
+    ...new Set(
+      value
+        .map(s => normalizeStore(s))
+        .filter(s => s && s.length <= 60),
+    ),
+  ].slice(0, 5);
+}
+
 /** One `additionalProducts` entry -> a clean product group, or null if it has
  * no usable search terms (dropped rather than searched as empty). */
 function cleanProductGroup(raw) {
@@ -1291,6 +1328,7 @@ function cleanProductGroup(raw) {
     terms,
     scope: raw?.scope === 'broad' ? 'broad' : 'item',
     must: cleanTerms(raw?.must),
+    stores: cleanStores(raw?.stores),
     intent: String(raw?.intent || '').trim().slice(0, 60),
   };
 }
@@ -1299,7 +1337,7 @@ function cleanProductGroup(raw) {
  * @param {Array<{ role: 'user'|'assistant', content: string }>} messages
  *   Trimmed recent history, ending with the new user turn.
  * @returns {Promise<
- *   | { kind: 'search', groups: {terms: string[], scope: 'item'|'broad', must: string[], intent: string}[], includeExpired: boolean, usage: object }
+ *   | { kind: 'search', groups: {terms: string[], scope: 'item'|'broad', must: string[], stores: string[], intent: string}[], includeExpired: boolean, usage: object }
  *   | { kind: 'price_insight', productHint: string, scope: 'item'|'broad', insightType: string, targetPrice: number|null, usage: object }
  *   | { kind: 'set_alert', productHint: string, targetPrice: number, comparison: 'lt'|'lte', usage: object }
  *   | { kind: 'list_alerts', usage: object }
@@ -1323,6 +1361,7 @@ export async function chatAgent(messages) {
           ),
           scope: 'item',
           must: [],
+          stores: [],
           intent: lastUser.slice(0, 40),
         },
       ],
@@ -1340,7 +1379,7 @@ export async function chatAgent(messages) {
 
   const json = await callGemini(
     {
-      systemInstruction: {parts: [{text: CHAT_SYSTEM}]},
+      systemInstruction: {parts: [{text: chatSystemPrompt(distinctStores())}]},
       contents,
       generationConfig: {
         temperature: 0,
@@ -1367,6 +1406,7 @@ export async function chatAgent(messages) {
 
   const terms = cleanTerms(parsed.terms);
   const must = cleanTerms(parsed.must);
+  const stores = cleanStores(parsed.stores);
   const scope = parsed.scope === 'broad' ? 'broad' : 'item';
   const productHint = String(parsed.productHint || '').trim().slice(0, 60);
   const targetPrice =
@@ -1382,7 +1422,7 @@ export async function chatAgent(messages) {
     result = {
       kind: 'search',
       groups: [
-        {terms, scope, must, intent: String(parsed.intent || '').slice(0, 60)},
+        {terms, scope, must, stores, intent: String(parsed.intent || '').slice(0, 60)},
         ...extraGroups,
       ],
       includeExpired: !!parsed.includeExpired,
@@ -1425,7 +1465,8 @@ export async function chatAgent(messages) {
           .map(
             g =>
               `  ${g.scope}  [${g.terms.join(', ')}]` +
-              (g.must.length ? `  must:[${g.must.join(', ')}]` : ''),
+              (g.must.length ? `  must:[${g.must.join(', ')}]` : '') +
+              (g.stores.length ? `  stores:[${g.stores.join(', ')}]` : ''),
           )
           .join('  +') + (result.includeExpired ? '  includeExpired' : '')
       : result.kind === 'price_insight'

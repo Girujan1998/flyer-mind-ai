@@ -1353,7 +1353,13 @@ const STOP_TERMS = new Set([
 export function searchProductsExpanded(
   termsIn,
   baseUrl,
-  {limit = 24, must: mustIn = [], broad = false, includeExpired = false} = {},
+  {
+    limit = 24,
+    must: mustIn = [],
+    broad = false,
+    includeExpired = false,
+    stores: storesIn = [],
+  } = {},
 ) {
   const norm = list =>
     [
@@ -1369,6 +1375,9 @@ export function searchProductsExpanded(
     return {products: [], pages: [], terms: [], must: [], total: 0};
   }
   const must = norm(mustIn);
+  const stores = [
+    ...new Set((Array.isArray(storesIn) ? storesIn : []).map(s => String(s).trim()).filter(Boolean)),
+  ].slice(0, 5);
   const today = todayIso();
 
   const lim = Math.max(1, Math.min(50, Number(limit) || 24));
@@ -1417,7 +1426,11 @@ export function searchProductsExpanded(
       : '';
   const statusBinds = statusClause ? [today, today, ...effStatuses] : [];
 
-  const where = `WHERE (${orClause})${mustClause}${statusClause}`;
+  const storeClause = stores.length
+    ? ` AND f.store IN (${stores.map(() => '?').join(',')})`
+    : '';
+
+  const where = `WHERE (${orClause})${mustClause}${statusClause}${storeClause}`;
 
   const rows = db
     .prepare(
@@ -1429,8 +1442,8 @@ export function searchProductsExpanded(
         ORDER BY match_score DESC, p.created_at DESC, p.rowid DESC
         LIMIT ?`,
     )
-    // bind order = statement text: SELECT score, WHERE (incl, must, status), LIMIT
-    .all(...scoreBinds, ...inclBinds, ...must, ...statusBinds, lim);
+    // bind order = statement text: SELECT score, WHERE (incl, must, status, store), LIMIT
+    .all(...scoreBinds, ...inclBinds, ...must, ...statusBinds, ...stores, lim);
 
   const total = db
     .prepare(
@@ -1438,7 +1451,7 @@ export function searchProductsExpanded(
          FROM products p JOIN flyers f ON f.id = p.flyer_id
         ${where}`,
     )
-    .get(...inclBinds, ...must, ...statusBinds).n;
+    .get(...inclBinds, ...must, ...statusBinds, ...stores).n;
 
   const products = rows.map(r => mapProductRow(r, baseUrl));
   return {products, pages: collectPages(products, baseUrl), terms, must, total};
