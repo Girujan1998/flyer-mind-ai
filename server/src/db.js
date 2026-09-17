@@ -1363,6 +1363,7 @@ export function searchProductsExpanded(
     broad = false,
     includeExpired = false,
     stores: storesIn = [],
+    department = '',
   } = {},
 ) {
   const norm = list =>
@@ -1375,7 +1376,8 @@ export function searchProductsExpanded(
     ].slice(0, 10);
 
   const terms = norm(termsIn);
-  if (!terms.length) {
+  const dept = isDepartment(department) ? department.toLowerCase() : '';
+  if (!terms.length && !dept) {
     return {products: [], pages: [], terms: [], must: [], total: 0};
   }
   const must = norm(mustIn);
@@ -1393,28 +1395,46 @@ export function searchProductsExpanded(
   const catExpr = "lower(coalesce(p.category,''))";
   const tagsExpr = "coalesce(p.tags,'')";
 
-  // Ranking: +1 for a whole-word hit anywhere, +3 when the product's category IS
-  // the term (so "Lactantia Purfiltre Milk" [milk] outranks "Coconut Milk").
-  const scoreExpr = terms
-    .map(
-      () =>
-        `(CASE WHEN wordmatch(${blob}, ?) THEN 1 ELSE 0 END) + ` +
-        `(CASE WHEN ${catExpr} = ? THEN 3 ELSE 0 END)`,
-    )
-    .join(' + ');
-  const scoreBinds = terms.flatMap(t => [t, t]);
+  let orClause;
+  let inclBinds;
+  let scoreExpr;
+  let scoreBinds;
 
-  // Inclusion: broad = whole word anywhere. item = the term is the product's
-  // category head ("salmon" for category "salmon") OR a complete tag entry
-  // ("salmon" tag on a "trout or salmon portions" combo tile) — so every real
-  // salmon option shows, but a "frozen fish" tile that never names salmon does
-  // not. Parent-category words ("fish", "seafood") are stripped by STOP_TERMS
-  // before this, which is what keeps unrelated combo tiles out.
-  const itemGroup = `(headmatch(${catExpr}, ?) OR tagexact(${tagsExpr}, ?))`;
-  const orClause = terms
-    .map(() => (broad ? `wordmatch(${blob}, ?)` : itemGroup))
-    .join(' OR ');
-  const inclBinds = broad ? terms : terms.flatMap(t => [t, t]);
+  if (dept) {
+    // Whole-department browse ("fruits at Walmart") — the same precise
+    // classification the Search tab's department filter uses, rather than
+    // guessing free-text synonyms for an entire aisle (which either misses
+    // most of it or, via a broad wordmatch on a category word, pulls in
+    // unrelated products that merely mention it). Any `terms` given only
+    // affect ranking, so a specifically-named item floats to the top.
+    orClause = `lower(coalesce(p.department,'')) = ?`;
+    inclBinds = [dept];
+    scoreExpr = terms.length
+      ? terms.map(() => `(CASE WHEN wordmatch(${blob}, ?) THEN 1 ELSE 0 END)`).join(' + ')
+      : '0';
+    scoreBinds = terms;
+  } else {
+    // Ranking: +1 for a whole-word hit anywhere, +3 when the product's category IS
+    // the term (so "Lactantia Purfiltre Milk" [milk] outranks "Coconut Milk").
+    scoreExpr = terms
+      .map(
+        () =>
+          `(CASE WHEN wordmatch(${blob}, ?) THEN 1 ELSE 0 END) + ` +
+          `(CASE WHEN ${catExpr} = ? THEN 3 ELSE 0 END)`,
+      )
+      .join(' + ');
+    scoreBinds = terms.flatMap(t => [t, t]);
+
+    // Inclusion: broad = whole word anywhere. item = the term is the product's
+    // category head ("salmon" for category "salmon") OR a complete tag entry
+    // ("salmon" tag on a "trout or salmon portions" combo tile) — so every real
+    // salmon option shows, but a "frozen fish" tile that never names salmon does
+    // not. Parent-category words ("fish", "seafood") are stripped by STOP_TERMS
+    // before this, which is what keeps unrelated combo tiles out.
+    const itemGroup = `(headmatch(${catExpr}, ?) OR tagexact(${tagsExpr}, ?))`;
+    orClause = terms.map(() => (broad ? `wordmatch(${blob}, ?)` : itemGroup)).join(' OR ');
+    inclBinds = broad ? terms : terms.flatMap(t => [t, t]);
+  }
 
   const mustClause = must.length
     ? ` AND (${must.map(() => `wordmatch(${blob}, ?)`).join(' OR ')})`

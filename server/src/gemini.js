@@ -1120,6 +1120,15 @@ function chatSystemPrompt(knownStores) {
 If the user names a product or category, use action "search":
 - "terms": lowercase search words. START with the plain noun alone ("salmon", "tomato", "milk"), THEN add singular/plural, varieties written in full ("roma tomato", "atlantic salmon"), close synonyms, 2-4 flyer brands. For scope "broad" ALSO add the aisle/category word ("pain relief" for medication); for scope "item" NEVER a parent category — not the item's own umbrella ("banana" is never "fruit", "carrot" is never "vegetable") and not the department ("fish", "meat", "cheese", "produce"). A parent-category word matches every product tagged with it, not just the one asked for. Max 8, <=3 words each.
 - "scope": "item" for a specific thing ("milk" = milk to drink, not milk cake or chocolate bars). "broad" for an aisle/umbrella ("medication", "snacks", "baby products") or "what X products are there" / "anything with X".
+- "department": ONLY when scope is "broad" AND the user is asking for an
+  ENTIRE department/aisle by its common name, not a specific item — "fruits
+  at Walmart", "what snacks do you have", "dairy products" — set this to
+  its exact matching value from DEPARTMENTS below. This browses that whole
+  department directly (precise and complete) instead of guessing search
+  words for it, which either misses most of it or accidentally pulls in
+  unrelated products. Leave "none" for anything item-specific (even if
+  scope is "broad" for an ingredient-style ask like "what has peanuts in
+  it" — there's no single department for that).
 - "must": ONLY when the user restricts it ("for kids", "gluten free", "unsalted") — words a result must ALSO contain, expanded like terms; keep the earlier "terms". "for kids" -> ["child","children","childrens","infant","toddler","junior"]. Else [].
 - "stores": ONLY when the user names specific store(s) to search at ("at No
   Frills", "at Walmart and Costco") — this LIMITS results to ONLY those
@@ -1142,18 +1151,19 @@ If the user names a product or category, use action "search":
   anything.
 - "additionalProducts": when the user names MULTIPLE DISTINCT products in one
   message ("price of tomatoes and chips", "do you have milk, eggs, and
-  bread") — put the FIRST product in terms/scope/must/stores/intent as
-  usual, then one entry here per EXTRA product, each shaped exactly like
-  {terms, scope, must, stores, intent} above. Max 3 extra (4 products total
-  — pick the first 4 named if there are more). Do NOT split one product's
-  own varieties/synonyms into separate entries ("roma or beefsteak
-  tomatoes" is still ONE product); only genuinely different items each get
-  their own entry. [] when there's only one product. If a store applies to
-  EVERY product in the message ("chips at No Frills and Walmart"), repeat
-  it in every entry's own "stores" field — there's no inheritance from the
-  first product.
+  bread") — put the FIRST product in terms/scope/must/stores/department/
+  intent as usual, then one entry here per EXTRA product, each shaped
+  exactly like {terms, scope, must, stores, department, intent} above. Max
+  3 extra (4 products total — pick the first 4 named if there are more). Do
+  NOT split one product's own varieties/synonyms into separate entries
+  ("roma or beefsteak tomatoes" is still ONE product); only genuinely
+  different items each get their own entry. [] when there's only one
+  product. If a store applies to EVERY product in the message ("chips at
+  No Frills and Walmart"), repeat it in every entry's own "stores" field —
+  there's no inheritance from the first product.
 
 KNOWN STORES: ${storeList}
+DEPARTMENTS: ${DEPARTMENTS.join(', ')}
 
 If the user asks whether a price is good, how a price compares to before, the
 lowest it's EVER been / historically, which store is USUALLY/typically
@@ -1197,17 +1207,24 @@ Fill every field; unused ones "" or [] or 0 or false.`;
 }
 
 // One extra product in a multi-product search ("...and chips") — same shape
-// as the primary terms/scope/must/stores/intent fields on CHAT_SCHEMA itself.
+// as the primary terms/scope/must/stores/department/intent fields on
+// CHAT_SCHEMA itself.
+// Gemini's structured-output schema rejects an empty-string enum value, so
+// "not a whole-department browse" needs a real sentinel instead of "".
+const NO_DEPARTMENT = 'none';
+const DEPARTMENT_ENUM = [...DEPARTMENTS, NO_DEPARTMENT];
+
 const PRODUCT_GROUP_SCHEMA = {
   type: 'OBJECT',
   properties: {
     terms: {type: 'ARRAY', items: {type: 'STRING'}},
     scope: {type: 'STRING', enum: ['item', 'broad']},
+    department: {type: 'STRING', enum: DEPARTMENT_ENUM},
     must: {type: 'ARRAY', items: {type: 'STRING'}},
     stores: {type: 'ARRAY', items: {type: 'STRING'}},
     intent: {type: 'STRING'},
   },
-  required: ['terms', 'scope', 'must', 'stores', 'intent'],
+  required: ['terms', 'scope', 'department', 'must', 'stores', 'intent'],
 };
 
 const CHAT_SCHEMA = {
@@ -1219,6 +1236,7 @@ const CHAT_SCHEMA = {
     },
     terms: {type: 'ARRAY', items: {type: 'STRING'}},
     scope: {type: 'STRING', enum: ['item', 'broad']},
+    department: {type: 'STRING', enum: DEPARTMENT_ENUM},
     must: {type: 'ARRAY', items: {type: 'STRING'}},
     stores: {type: 'ARRAY', items: {type: 'STRING'}},
     intent: {type: 'STRING'},
@@ -1244,6 +1262,7 @@ const CHAT_SCHEMA = {
     'action',
     'terms',
     'scope',
+    'department',
     'must',
     'stores',
     'intent',
@@ -1328,15 +1347,18 @@ function stripStoreTerms(terms, storeNamesLower) {
 }
 
 /** One `additionalProducts` entry -> a clean product group, or null if it has
- * no usable search terms (dropped rather than searched as empty). */
+ * no usable search terms or department (dropped rather than searched as
+ * empty). */
 function cleanProductGroup(raw, storeNamesLower) {
   const terms = stripStoreTerms(cleanTerms(raw?.terms), storeNamesLower);
-  if (!terms.length) {
+  const department = DEPARTMENTS.includes(raw?.department) ? raw.department : '';
+  if (!terms.length && !department) {
     return null;
   }
   return {
     terms,
     scope: raw?.scope === 'broad' ? 'broad' : 'item',
+    department,
     must: stripStoreTerms(cleanTerms(raw?.must), storeNamesLower),
     stores: cleanStores(raw?.stores),
     intent: String(raw?.intent || '').trim().slice(0, 60),
@@ -1347,7 +1369,7 @@ function cleanProductGroup(raw, storeNamesLower) {
  * @param {Array<{ role: 'user'|'assistant', content: string }>} messages
  *   Trimmed recent history, ending with the new user turn.
  * @returns {Promise<
- *   | { kind: 'search', groups: {terms: string[], scope: 'item'|'broad', must: string[], stores: string[], intent: string}[], includeExpired: boolean, usage: object }
+ *   | { kind: 'search', groups: {terms: string[], scope: 'item'|'broad', department: string, must: string[], stores: string[], intent: string}[], includeExpired: boolean, usage: object }
  *   | { kind: 'price_insight', productHint: string, scope: 'item'|'broad', insightType: string, targetPrice: number|null, usage: object }
  *   | { kind: 'set_alert', productHint: string, targetPrice: number, comparison: 'lt'|'lte', usage: object }
  *   | { kind: 'list_alerts', usage: object }
@@ -1370,6 +1392,7 @@ export async function chatAgent(messages) {
               .filter(w => w.length > 2),
           ),
           scope: 'item',
+          department: '',
           must: [],
           stores: [],
           intent: lastUser.slice(0, 40),
@@ -1419,6 +1442,7 @@ export async function chatAgent(messages) {
   const terms = stripStoreTerms(cleanTerms(parsed.terms), storeNamesLower);
   const must = stripStoreTerms(cleanTerms(parsed.must), storeNamesLower);
   const stores = cleanStores(parsed.stores);
+  const department = DEPARTMENTS.includes(parsed.department) ? parsed.department : '';
   const scope = parsed.scope === 'broad' ? 'broad' : 'item';
   const productHint = String(parsed.productHint || '').trim().slice(0, 60);
   const targetPrice =
@@ -1427,7 +1451,7 @@ export async function chatAgent(messages) {
       : null;
 
   let result;
-  if (parsed.action === 'search' && terms.length) {
+  if (parsed.action === 'search' && (terms.length || department)) {
     const extraGroups = Array.isArray(parsed.additionalProducts)
       ? parsed.additionalProducts
           .slice(0, 3)
@@ -1437,7 +1461,14 @@ export async function chatAgent(messages) {
     result = {
       kind: 'search',
       groups: [
-        {terms, scope, must, stores, intent: String(parsed.intent || '').slice(0, 60)},
+        {
+          terms,
+          scope,
+          department,
+          must,
+          stores,
+          intent: String(parsed.intent || '').slice(0, 60),
+        },
         ...extraGroups,
       ],
       includeExpired: !!parsed.includeExpired,
@@ -1480,6 +1511,7 @@ export async function chatAgent(messages) {
           .map(
             g =>
               `  ${g.scope}  [${g.terms.join(', ')}]` +
+              (g.department ? `  dept:${g.department}` : '') +
               (g.must.length ? `  must:[${g.must.join(', ')}]` : '') +
               (g.stores.length ? `  stores:[${g.stores.join(', ')}]` : ''),
           )

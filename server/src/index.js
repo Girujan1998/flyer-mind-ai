@@ -495,9 +495,10 @@ function runSearchGroup(group, baseUrl, includeExpired, limit) {
       broad: group.scope === 'broad',
       includeExpired,
       stores: group.stores,
+      department: group.department,
     },
   );
-  const label = group.intent || terms[0] || 'that';
+  const label = group.intent || group.department || terms[0] || 'that';
   const storeNote = group.stores.length ? ` at ${group.stores.join(' and ')}` : '';
   const expiredNote = includeExpired ? ', including expired flyers' : '';
   const priceNote =
@@ -509,9 +510,9 @@ function runSearchGroup(group, baseUrl, includeExpired, limit) {
       (total > products.length ? ` (showing ${products.length}).` : '.') +
       priceNote
     : `I couldn't find anything for "${label}"${storeNote} in the flyers right now.` +
-      (terms.length ? ` I searched: ${terms.join(', ')}` : '') +
-      (must.length ? `, filtered to: ${must.join(', ')}` : '') +
-      '.';
+      (terms.length
+        ? ` I searched: ${terms.join(', ')}${must.length ? `, filtered to: ${must.join(', ')}` : ''}.`
+        : '');
   return {label, products, pages, terms, must, total, reply};
 }
 
