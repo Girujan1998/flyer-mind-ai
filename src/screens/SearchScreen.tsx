@@ -278,6 +278,8 @@ function SearchScreen(): React.JSX.Element {
               ? `No products match "${debounced}".`
               : activeFilters > 0
               ? 'No products match these filters.'
+              : facets.expiredCount > 0
+              ? 'No active or upcoming flyers right now.'
               : 'No products yet — upload a flyer.'}
           </Text>
           {activeFilters > 0 ? (
@@ -285,6 +287,14 @@ function SearchScreen(): React.JSX.Element {
               onPress={() => setFilters(EMPTY_FILTERS)}
               style={styles.retry}>
               <Text style={styles.retryText}>Clear filters</Text>
+            </Pressable>
+          ) : facets.expiredCount > 0 ? (
+            <Pressable
+              onPress={() =>
+                setFilters({...EMPTY_FILTERS, includeExpired: true})
+              }
+              style={styles.retry}>
+              <Text style={styles.retryText}>Show expired flyers</Text>
             </Pressable>
           ) : null}
         </View>
