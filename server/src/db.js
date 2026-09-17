@@ -1329,6 +1329,10 @@ const STOP_TERMS = new Set([
   'household',
   'cleaning',
   'aisle',
+  'fruit',
+  'fruits',
+  'vegetable',
+  'vegetables',
 ]);
 
 /**
