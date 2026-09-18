@@ -601,12 +601,16 @@ async function appendUsageLog(entry) {
 
 /**
  * @param {Array<{ page: number, jpeg: string }>} pages  page number + base64 JPEG (no data: prefix)
+ * @param {{ onPage?: (pagesDone: number) => void }} [opts]  `onPage` fires once
+ *   per page as its batch finishes (success or failure) — the upload's
+ *   progress signal.
  * @returns {Promise<{ products: Array<object>, usage: object }>}
  */
-export async function extractFlyer(pages) {
+export async function extractFlyer(pages, {onPage} = {}) {
   // Offline smoke-test path (GEMINI_API_KEY=MOCK) — exercises render -> POST ->
   // crop -> grid without a live key.
   if (process.env.GEMINI_API_KEY === 'MOCK') {
+    pages.forEach(() => onPage?.(1));
     const products = pages.flatMap(p =>
       [
         {
@@ -685,6 +689,7 @@ export async function extractFlyer(pages) {
         failedPages.push(...batch.map(p => p.page));
         results[i] = [];
         console.warn(`[gemini] pages ${label} FAILED: ${err.message}`);
+        onPage?.(batch.length);
         continue;
       }
       const ms = Date.now() - started;
@@ -696,6 +701,7 @@ export async function extractFlyer(pages) {
         ...usage,
       };
       results[i] = products;
+      onPage?.(batch.length);
 
       console.log(
         `[gemini] pages ${label}  ` +

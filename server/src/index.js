@@ -136,16 +136,93 @@ app.get('/health', (_req, res) => {
   });
 });
 
-// Extractions in progress, keyed by the PDF's sha256. If the phone locks and the
-// app's upload connection dies mid-extraction, the app retries the same POST —
-// this lets that retry attach to the running job instead of starting a second
-// (wasted) Gemini pass. A finished flyer is deduped by findFlyerByHash instead.
+// Extraction jobs, keyed by the PDF's sha256 (doubles as the job id the app
+// polls). If the phone locks and the app's connection dies mid-extraction,
+// re-posting the same PDF attaches to the running job instead of starting a
+// second (wasted) Gemini pass — same reason a finished job is kept around
+// briefly (JOB_RETENTION_MS) after it settles rather than cleared instantly,
+// so a poll that lands right after completion still sees the result. A
+// flyer that finished a while ago is deduped by findFlyerByHash instead.
 const inFlight = new Map();
+const JOB_RETENTION_MS = 2 * 60 * 1000;
 
-async function runExtraction({buffer, name, hash, rendered, maxPages}) {
+/** The same summary shape `runExtraction` produces, for an already-stored flyer. */
+function resultFromExisting(existing) {
+  return {
+    flyerId: existing.id,
+    name: existing.name,
+    savedProducts: productCountForFlyer(existing.id),
+    renderedPages: existing.rendered_pages,
+    totalPages: existing.total_pages,
+    store: existing.store || '',
+    validFrom: existing.valid_from || '',
+    validTo: existing.valid_to || '',
+    failedPages: [],
+    reused: true,
+  };
+}
+
+/** `{ jobId, state, progress, result?, error? }` — what both the kickoff POST
+ * and the status GET return for a job. */
+function jobStatusResponse(job, jobId) {
+  return {
+    jobId,
+    state: job.state,
+    progress: job.progress,
+    result: job.state === 'done' ? job.result : undefined,
+    error: job.state === 'error' ? job.error : undefined,
+  };
+}
+
+// Kicks off extraction in the background and tracks its progress/result on a
+// plain object in `inFlight` — the route handlers never await this directly,
+// so POST /flyers/extract can answer immediately and the app polls the
+// status route for updates instead of blocking on one long request.
+function startJob(hash, {buffer, name, rendered, maxPages}) {
+  const job = {
+    state: 'processing',
+    progress: {done: 0, total: rendered.pages.length},
+    result: null,
+    error: null,
+  };
+  inFlight.set(hash, job);
+
+  runExtraction({
+    buffer,
+    name,
+    hash,
+    rendered,
+    maxPages,
+    onPage: n => {
+      job.progress.done = Math.min(job.progress.total, job.progress.done + n);
+    },
+  })
+    .then(result => {
+      job.state = 'done';
+      job.result = result;
+    })
+    .catch(err => {
+      console.error('[extract] failed:', err);
+      job.state = 'error';
+      job.error = err?.message || 'Extraction failed';
+    })
+    .finally(() => {
+      setTimeout(() => {
+        if (inFlight.get(hash) === job) {
+          inFlight.delete(hash);
+        }
+      }, JOB_RETENTION_MS).unref?.();
+    });
+
+  return job;
+}
+
+async function runExtraction({buffer, name, hash, rendered, maxPages, onPage}) {
   const t0 = Date.now();
   const [{products, usage}, metaResult] = await Promise.all([
-    extractFlyer(rendered.pages.map(p => ({page: p.page, jpeg: p.jpegBase64}))),
+    extractFlyer(rendered.pages.map(p => ({page: p.page, jpeg: p.jpegBase64})), {
+      onPage,
+    }),
     extractFlyerMeta(rendered.pages[0].jpegBase64).catch(err => {
       console.warn(`[gemini] flyer-meta failed: ${err.message}`);
       return null;
@@ -211,12 +288,12 @@ async function runExtraction({buffer, name, hash, rendered, maxPages}) {
 /**
  * POST /flyers/extract   (multipart/form-data, field "file" = the flyer PDF)
  *
- * Renders + Gemini-extracts the flyer, SAVES products/pages/boxes to the DB,
- * and returns only a summary (the products live in the DB, seen via /products):
- *   { flyerId, name, savedProducts, renderedPages, totalPages, failedPages, reused }
- *
- * Re-posting the same PDF is safe: if it finished it returns the stored summary
- * (`reused: true`); if it's still running the request waits on that same job.
+ * Kicks off (or attaches to) extraction and answers right away with
+ * `{ jobId, state, progress, result?, error? }` — it does NOT wait for
+ * extraction to finish. `state` is 'processing' (poll GET below), 'done'
+ * (already stored, or finished so fast — e.g. MOCK mode — that `result` is
+ * already attached), or 'error'. Re-posting the same PDF is safe: it just
+ * attaches to (or re-reports) the same job, deduped by content hash.
  */
 app.post('/flyers/extract', handleUpload, async (req, res) => {
   try {
@@ -237,17 +314,12 @@ app.post('/flyers/extract', handleUpload, async (req, res) => {
     const existing = findFlyerByHash(hash);
     if (existing) {
       console.log(`[extract] ${name} — already stored, skipping Gemini`);
+      const result = resultFromExisting(existing);
       return res.json({
-        flyerId: existing.id,
-        name: existing.name,
-        savedProducts: productCountForFlyer(existing.id),
-        renderedPages: existing.rendered_pages,
-        totalPages: existing.total_pages,
-        store: existing.store || '',
-        validFrom: existing.valid_from || '',
-        validTo: existing.valid_to || '',
-        failedPages: [],
-        reused: true,
+        jobId: hash,
+        state: 'done',
+        progress: {done: result.renderedPages, total: result.renderedPages},
+        result,
       });
     }
 
@@ -273,30 +345,44 @@ app.post('/flyers/extract', handleUpload, async (req, res) => {
           .json({error: 'The PDF has no renderable pages.'});
       }
 
-      job = runExtraction({
-        buffer: req.file.buffer,
-        name,
-        hash,
-        rendered,
-        maxPages,
-      });
-      inFlight.set(hash, job);
-      const clear = () => inFlight.delete(hash);
-      job.then(clear, clear);
+      job = startJob(hash, {buffer: req.file.buffer, name, rendered, maxPages});
     }
 
-    const summary = await job;
-    // The original request's socket may be dead (phone locked) while its retry
-    // is the one still listening — only answer a live connection.
-    if (!res.writableEnded) {
-      res.json(summary);
-    }
+    res.json(jobStatusResponse(job, hash));
   } catch (err) {
     console.error('[extract] failed:', err);
     if (!res.writableEnded) {
       res.status(500).json({error: err?.message || 'Extraction failed'});
     }
   }
+});
+
+/**
+ * GET /flyers/extract/:jobId/status -> { jobId, state, progress, result?, error? }
+ * `jobId` is the sha256 POST /flyers/extract returned. Poll this until
+ * `state` isn't 'processing'. If the in-memory job already finished and was
+ * cleared (or the server restarted), falls back to the persisted flyer so a
+ * trailing poll still resolves; a truly unknown id is a 404.
+ */
+app.get('/flyers/extract/:jobId/status', (req, res) => {
+  const {jobId} = req.params;
+  const job = inFlight.get(jobId);
+  if (job) {
+    return res.json(jobStatusResponse(job, jobId));
+  }
+  const existing = findFlyerByHash(jobId);
+  if (existing) {
+    const result = resultFromExisting(existing);
+    return res.json({
+      jobId,
+      state: 'done',
+      progress: {done: result.renderedPages, total: result.renderedPages},
+      result,
+    });
+  }
+  res
+    .status(404)
+    .json({jobId, state: 'error', error: 'Unknown or expired upload job.'});
 });
 
 /**

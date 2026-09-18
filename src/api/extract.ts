@@ -145,14 +145,54 @@ export type UploadResult = {
   reused: boolean;
 };
 
+export type UploadProgress = {
+  /** Pages the server has finished extracting so far (success or failure). */
+  done: number;
+  /** Total pages being extracted; 0 until the server has rendered the PDF. */
+  total: number;
+};
+
+type UploadJobStatus = {
+  jobId: string;
+  state: 'processing' | 'done' | 'error';
+  progress: UploadProgress;
+  result?: UploadResult;
+  error?: string;
+};
+
+/** Sleep that resolves early if the signal aborts. */
+export function delay(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise(resolve => {
+    if (signal?.aborted) {
+      resolve();
+      return;
+    }
+    const t = setTimeout(resolve, ms);
+    const onAbort = () => {
+      clearTimeout(t);
+      resolve();
+    };
+    signal?.addEventListener?.('abort', onAbort);
+  });
+}
+
+const POLL_INTERVAL_MS = 1000;
+
 /**
  * Upload a flyer PDF. The server rasterizes each page, runs Gemini vision, and
- * SAVES the products + bounding boxes to its database. Returns a summary only —
- * browse the products on the Search screen.
+ * SAVES the products + bounding boxes to its database — returning a summary
+ * only (browse the products on the Search screen).
+ *
+ * The upload itself returns almost immediately with a job id; this then
+ * polls the job's status roughly once a second until it finishes, calling
+ * `onProgress` with each update so the caller can render a real progress bar
+ * instead of an indefinite spinner for what can be a multi-page, multi-call
+ * Gemini extraction.
  */
-export function extractFlyer(
+export async function extractFlyer(
   file: SelectedPdf,
   signal?: AbortSignal,
+  onProgress?: (progress: UploadProgress) => void,
 ): Promise<UploadResult> {
   const form = new FormData();
   form.append('file', {
@@ -160,11 +200,30 @@ export function extractFlyer(
     name: file.name || 'flyer.pdf',
     type: file.mimeType || 'application/pdf',
   } as unknown as Blob);
-  return api<UploadResult>('/flyers/extract', {
+  let status = await api<UploadJobStatus>('/flyers/extract', {
     method: 'POST',
     body: form,
     signal,
   });
+
+  while (status.state === 'processing') {
+    onProgress?.(status.progress);
+    await delay(POLL_INTERVAL_MS, signal);
+    if (signal?.aborted) {
+      throw new AbortedError();
+    }
+    status = await api<UploadJobStatus>(
+      `/flyers/extract/${encodeURIComponent(status.jobId)}/status`,
+      {signal},
+    );
+  }
+
+  onProgress?.(status.progress);
+
+  if (status.state === 'error' || !status.result) {
+    throw new Error(status.error || 'Extraction failed');
+  }
+  return status.result;
 }
 
 export type ChatRole = 'user' | 'assistant';

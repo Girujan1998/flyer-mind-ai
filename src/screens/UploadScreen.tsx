@@ -12,7 +12,9 @@ import {
   AbortedError,
   NoServerError,
   SelectedPdf,
+  UploadProgress,
   UploadResult,
+  delay,
   extractFlyer,
   formatValidity,
 } from '../api/extract';
@@ -20,9 +22,11 @@ import {MAX_UPLOAD_MB} from '../config';
 import ScreenHeader from '../components/ScreenHeader';
 import {Palette, fonts, radius, spacing, useThemedStyles} from '../theme';
 
+const NO_PROGRESS: UploadProgress = {done: 0, total: 0};
+
 type Phase =
   | {kind: 'idle'}
-  | {kind: 'uploading'}
+  | {kind: 'uploading'; progress: UploadProgress}
   | {kind: 'reconnecting'; attempt: number}
   | {kind: 'done'; result: UploadResult}
   | {kind: 'error'; message: string};
@@ -30,22 +34,6 @@ type Phase =
 /** How long to keep retrying after the connection drops (phone lock, Wi-Fi blip). */
 const RETRY_WINDOW_MS = 5 * 60 * 1000;
 const RETRY_GAP_MS = 3000;
-
-/** Sleep that resolves early if the signal aborts. */
-function delay(ms: number, signal: AbortSignal): Promise<void> {
-  return new Promise(resolve => {
-    if (signal.aborted) {
-      resolve();
-      return;
-    }
-    const t = setTimeout(resolve, ms);
-    const onAbort = () => {
-      clearTimeout(t);
-      resolve();
-    };
-    signal.addEventListener?.('abort', onAbort);
-  });
-}
 
 function formatBytes(bytes: number): string {
   if (bytes < 1024) {
@@ -107,14 +95,16 @@ function UploadScreen(): React.JSX.Element {
     }
     const controller = new AbortController();
     abortRef.current = controller;
-    setPhase({kind: 'uploading'});
+    setPhase({kind: 'uploading', progress: NO_PROGRESS});
 
     const stopAt = Date.now() + RETRY_WINDOW_MS;
     let attempt = 0;
     try {
       for (;;) {
         try {
-          const result = await extractFlyer(file, controller.signal);
+          const result = await extractFlyer(file, controller.signal, progress =>
+            setPhase({kind: 'uploading', progress}),
+          );
           setPhase({kind: 'done', result});
           setFile(null);
           return;
@@ -239,15 +229,33 @@ function UploadScreen(): React.JSX.Element {
         {working ? (
           <>
             <View style={styles.uploadingRow}>
-              <ActivityIndicator color={colors.primary} />
+              {phase.kind === 'uploading' && phase.progress.total > 0 ? null : (
+                <ActivityIndicator color={colors.primary} />
+              )}
               <Text style={styles.uploadingText}>
                 {phase.kind === 'reconnecting'
                   ? `Connection dropped — reconnecting. Your flyer is still being processed on the server${
                       phase.attempt > 1 ? ` (attempt ${phase.attempt})` : ''
                     }.`
+                  : phase.kind === 'uploading' && phase.progress.total > 0
+                  ? `Extracting page ${phase.progress.done} of ${phase.progress.total}…`
                   : 'Extracting products… this keeps running if you switch tabs or leave the app.'}
               </Text>
             </View>
+            {phase.kind === 'uploading' && phase.progress.total > 0 ? (
+              <View style={styles.progressTrack}>
+                <View
+                  style={[
+                    styles.progressFill,
+                    {
+                      width: `${Math.round(
+                        (phase.progress.done / phase.progress.total) * 100,
+                      )}%`,
+                    },
+                  ]}
+                />
+              </View>
+            ) : null}
             <Pressable
               onPress={stopUpload}
               style={({pressed}) => [
@@ -347,6 +355,17 @@ const makeStyles = (c: Palette) =>
       color: c.textMuted,
       fontSize: 13,
       lineHeight: 18,
+    },
+    progressTrack: {
+      height: 8,
+      borderRadius: 4,
+      backgroundColor: c.border,
+      overflow: 'hidden',
+    },
+    progressFill: {
+      height: '100%',
+      backgroundColor: c.primary,
+      borderRadius: 4,
     },
     error: {color: c.danger, fontSize: 14},
     doneCard: {
