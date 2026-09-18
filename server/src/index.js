@@ -387,9 +387,12 @@ app.get('/flyers/extract/:jobId/status', (req, res) => {
 
 /**
  * GET /products?q=<text>&limit=20&offset=0
- *   -> { products: [{ id, flyerId, page, name, price, priceValue, info, box, confidence }],
- *        pages:    [{ flyerId, page, width, height, image }],   image = absolute URL
- *        total, hasMore }
+ *   -> { groups: [{ groupKey, label, storeCount, products: [{ id, flyerId, page,
+ *          name, price, priceValue, info, box, confidence, ... }] }],
+ *        pages: [{ flyerId, page, width, height, image }],   image = absolute URL
+ *        totalGroups, totalProducts, hasMore }
+ * `limit`/`offset` paginate groups (canonical products), not individual
+ * products — see searchProducts() in db.js.
  */
 app.get('/products', (req, res) => {
   try {

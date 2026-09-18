@@ -401,10 +401,25 @@ export async function createAlert(input: {
   });
 }
 
-export type SearchResult = {
+/** One canonical product's sightings across stores — cheapest first — so the
+ * Search tab can show "carrots" (say) as one comparable group instead of
+ * scattering its per-store listings through a flat, upload-order list. A
+ * product not yet linked to a canonical row is its own single-item group. */
+export type ProductGroup = {
+  groupKey: string;
+  label: string;
+  storeCount: number;
   products: Product[];
+};
+
+export type SearchResult = {
+  groups: ProductGroup[];
   pages: FlyerPage[];
-  total: number;
+  /** Total canonical-product groups matching the query/filters — what
+   * `limit`/`offset` paginate over. */
+  totalGroups: number;
+  /** Total individual product listings across all matching groups. */
+  totalProducts: number;
   hasMore: boolean;
 };
 
@@ -458,7 +473,9 @@ function filtersToQuery(f: ProductFilters): string[] {
   ];
 }
 
-/** Paginated + text search over every stored product, newest first. */
+/** Paginated + text search over every stored product, grouped by canonical
+ * product (same real-world item across stores) so comparable prices sit
+ * together; `limit`/`offset` paginate groups, not individual products. */
 export function searchProducts(params: {
   q?: string;
   filters?: ProductFilters;

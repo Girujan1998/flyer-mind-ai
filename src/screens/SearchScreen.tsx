@@ -17,6 +17,7 @@ import {
   NoServerError,
   Product,
   ProductFilters,
+  ProductGroup,
   countActiveFilters,
   fetchFilterFacets,
   pageKey,
@@ -27,7 +28,7 @@ import ProductCard from '../components/ProductCard';
 import ProductInfoModal from '../components/ProductInfoModal';
 import SourcePageModal from '../components/SourcePageModal';
 import ScreenHeader from '../components/ScreenHeader';
-import {Palette, radius, spacing, useThemedStyles} from '../theme';
+import {Palette, fonts, radius, spacing, useThemedStyles} from '../theme';
 
 const PAGE_SIZE = 20;
 const GAP = spacing.sm;
@@ -55,9 +56,9 @@ function SearchScreen(): React.JSX.Element {
   const [facets, setFacets] = useState<FilterFacets>(NO_FACETS);
   const [filterOpen, setFilterOpen] = useState(false);
 
-  const [products, setProducts] = useState<Product[]>([]);
+  const [groups, setGroups] = useState<ProductGroup[]>([]);
   const [pages, setPages] = useState<Map<string, FlyerPage>>(new Map());
-  const [total, setTotal] = useState(0);
+  const [totalProducts, setTotalProducts] = useState(0);
   const [hasMore, setHasMore] = useState(false);
 
   const [loading, setLoading] = useState(true);
@@ -108,9 +109,9 @@ function SearchScreen(): React.JSX.Element {
       if (id !== reqId.current) {
         return;
       }
-      setProducts(res.products);
+      setGroups(res.groups);
       setPages(new Map(res.pages.map(p => [pageKey(p.flyerId, p.page), p])));
-      setTotal(res.total);
+      setTotalProducts(res.totalProducts);
       setHasMore(res.hasMore);
     } catch (err) {
       if (id !== reqId.current) {
@@ -121,7 +122,7 @@ function SearchScreen(): React.JSX.Element {
           ? err.message
           : 'Search failed',
       );
-      setProducts([]);
+      setGroups([]);
       setHasMore(false);
     } finally {
       if (id === reqId.current) {
@@ -144,11 +145,11 @@ function SearchScreen(): React.JSX.Element {
         q: debounced,
         filters,
         limit: PAGE_SIZE,
-        offset: products.length,
+        offset: groups.length,
       });
-      setProducts(prev => [...prev, ...res.products]);
+      setGroups(prev => [...prev, ...res.groups]);
       mergePages(res.pages);
-      setTotal(res.total);
+      setTotalProducts(res.totalProducts);
       setHasMore(res.hasMore);
     } catch {
       // keep what we have; the button stays for a retry
@@ -156,6 +157,8 @@ function SearchScreen(): React.JSX.Element {
       setLoadingMore(false);
     }
   };
+
+  const loadedProducts = groups.reduce((n, g) => n + g.products.length, 0);
 
   const renderFooter = () => {
     if (loadingMore) {
@@ -171,13 +174,13 @@ function SearchScreen(): React.JSX.Element {
           onPress={loadMore}
           style={({pressed}) => [styles.moreBtn, pressed && styles.pressed]}>
           <Text style={styles.moreText}>
-            Load more ({products.length} of {total})
+            Load more ({loadedProducts} of {totalProducts})
           </Text>
         </Pressable>
       );
     }
-    if (products.length > 0) {
-      return <Text style={styles.footerEnd}>{total} products</Text>;
+    if (groups.length > 0) {
+      return <Text style={styles.footerEnd}>{totalProducts} products</Text>;
     }
     return null;
   };
@@ -188,7 +191,7 @@ function SearchScreen(): React.JSX.Element {
         title="Search"
         trailing={
           // count for the current query + filters, not the grand total
-          !error && total > 0 ? `${total} items` : undefined
+          !error && totalProducts > 0 ? `${totalProducts} items` : undefined
         }
       />
 
@@ -271,7 +274,7 @@ function SearchScreen(): React.JSX.Element {
             <Text style={styles.retryText}>Retry</Text>
           </Pressable>
         </View>
-      ) : products.length === 0 ? (
+      ) : groups.length === 0 ? (
         <View style={styles.center}>
           <Text style={styles.empty}>
             {debounced
@@ -300,22 +303,36 @@ function SearchScreen(): React.JSX.Element {
         </View>
       ) : (
         <FlatList
-          data={products}
-          keyExtractor={p => p.id}
-          numColumns={2}
-          columnWrapperStyle={styles.column}
-          contentContainerStyle={styles.grid}
+          data={groups}
+          keyExtractor={g => g.groupKey}
+          contentContainerStyle={styles.list}
           keyboardShouldPersistTaps="handled"
           removeClippedSubviews
-          initialNumToRender={8}
-          maxToRenderPerBatch={8}
+          initialNumToRender={6}
+          maxToRenderPerBatch={6}
           windowSize={7}
           renderItem={({item}) => (
-            <ProductCard
-              product={item}
-              width={COLUMN_WIDTH}
-              onPress={setInfoProduct}
-            />
+            <View style={styles.group}>
+              <Text style={styles.groupHeader}>
+                {item.label}
+                {item.storeCount > 1 ? (
+                  <Text style={styles.groupHeaderCount}>
+                    {'  ·  '}
+                    {item.storeCount} stores
+                  </Text>
+                ) : null}
+              </Text>
+              <View style={styles.grid}>
+                {item.products.map(p => (
+                  <ProductCard
+                    key={p.id}
+                    product={p}
+                    width={COLUMN_WIDTH}
+                    onPress={setInfoProduct}
+                  />
+                ))}
+              </View>
+            </View>
           )}
           ListFooterComponent={renderFooter()}
         />
@@ -450,10 +467,25 @@ const makeStyles = (c: Palette) =>
     error: {color: c.danger, fontSize: 14, textAlign: 'center'},
     retry: {marginTop: spacing.md, padding: spacing.sm},
     retryText: {color: c.primary, fontSize: 14, fontWeight: '600'},
-    grid: {padding: spacing.md, paddingBottom: 96, gap: GAP},
-    // stretch both cards in a row to the taller one's height so their footers
-    // (store label) line up
-    column: {gap: GAP, alignItems: 'stretch'},
+    list: {padding: spacing.md, paddingBottom: 96, gap: spacing.lg},
+    group: {gap: spacing.sm},
+    groupHeader: {
+      color: c.text,
+      fontFamily: fonts.semibold,
+      fontSize: 13,
+      fontWeight: '600',
+      textTransform: 'uppercase',
+      letterSpacing: 0.4,
+    },
+    groupHeaderCount: {color: c.textMuted, fontWeight: '500'},
+    // wraps a group's cards 2-up; stretched so a row's footers (store label)
+    // line up the way the old 2-column FlatList grid did.
+    grid: {
+      flexDirection: 'row',
+      flexWrap: 'wrap',
+      gap: GAP,
+      alignItems: 'stretch',
+    },
     footer: {paddingVertical: spacing.lg, alignItems: 'center'},
     footerEnd: {
       textAlign: 'center',

@@ -1000,15 +1000,6 @@ const STATUS_CASE = `CASE
   ELSE 'valid'
 END`;
 
-// Sort key for the default (unfiltered) list: upcoming first (it's the newest
-// news — a flyer about to start), then active/undated, then expired at the
-// bottom. Same two `?` binds as STATUS_CASE.
-const STATUS_RANK = `CASE ${STATUS_CASE}
-  WHEN 'upcoming' THEN 0
-  WHEN 'expired'  THEN 2
-  ELSE 1
-END`;
-
 const toList = v =>
   (Array.isArray(v) ? v : String(v || '').split(','))
     .map(s => String(s).trim())
@@ -1200,14 +1191,28 @@ function collectPages(products, baseUrl) {
 }
 
 /**
- * Paginated search over all stored products, newest first.
+ * Paginated, canonical-product-grouped search over all stored products.
  * `q` matches name/info/category/tags; `departments` / `stores` / `statuses`
  * are optional arrays (or comma strings) that further narrow the set.
  * Expired flyers are hidden unless `statuses` explicitly asks for them,
  * `includeExpired` is set (folds expired in alongside everything else), or
  * `expiredOnly` is set (expired and nothing else, overriding `statuses`).
- * `baseUrl` is `http://<host>` — used to build page + thumbnail URLs.
- * Returns { products, pages, total, hasMore }.
+ *
+ * Results are grouped by canonical product — the same real-world item
+ * across flyers/stores — so a shopper can compare "carrots" or "2% milk"
+ * across every store carrying it in one glance, instead of a flat list that
+ * happens to cluster by upload order (one flyer, one store, at a time). A
+ * product with no canonical match yet (the background matching pass hasn't
+ * reached it) is its own single-item group rather than disappearing.
+ * Groups are ordered by how many distinct stores carry them — most
+ * comparable first — except for a text search, which ranks by how well the
+ * group matches the query (store count only breaks a tie).
+ *
+ * `limit`/`offset` paginate GROUPS, not individual products, since a
+ * group's size varies. `baseUrl` is `http://<host>` — used to build page +
+ * thumbnail URLs. Returns { groups, pages, totalGroups, totalProducts,
+ * hasMore }, where each group is { groupKey, label, storeCount, products }
+ * and `products` is sorted cheapest-first.
  */
 export function searchProducts(
   {
@@ -1223,7 +1228,7 @@ export function searchProducts(
   },
   baseUrl,
 ) {
-  const lim = Math.max(1, Math.min(100, Number(limit) || 20));
+  const lim = Math.max(1, Math.min(50, Number(limit) || 20));
   const off = Math.max(0, Number(offset) || 0);
   const today = todayIso();
 
@@ -1238,13 +1243,26 @@ export function searchProducts(
     today,
   );
 
-  const total = db
-    .prepare(
-      `SELECT COUNT(*) AS n
-         FROM products p JOIN flyers f ON f.id = p.flyer_id
-         ${clause}`,
-    )
-    .get(...params).n;
+  const FROM = 'FROM products p JOIN flyers f ON f.id = p.flyer_id';
+  // A product not yet linked to a canonical row is grouped under its own id,
+  // so it still shows up (as a singleton group) instead of vanishing.
+  const GROUP_KEY = 'COALESCE(p.canonical_product_id, p.id)';
+
+  const totalProducts = db.prepare(`SELECT COUNT(*) AS n ${FROM} ${clause}`).get(...params).n;
+
+  const totalGroups = totalProducts
+    ? db
+        .prepare(
+          `SELECT COUNT(*) AS n FROM (
+             SELECT ${GROUP_KEY} AS gk ${FROM} ${clause} GROUP BY gk
+           )`,
+        )
+        .get(...params).n
+    : 0;
+
+  if (!totalGroups) {
+    return {groups: [], pages: [], totalGroups: 0, totalProducts: 0, hasMore: false};
+  }
 
   // Relevance: +3 when the category IS the term, +3 when the term is the
   // category head, +2 for an exact tag, +1 for a whole-word name hit — so a
@@ -1263,39 +1281,65 @@ export function searchProducts(
     .join(' + ');
   const scoreBinds = terms.flatMap(t => [t, t, t, t]);
 
-  // Plain browse and a bare aisle browse rank by flyer status (expired sinks);
-  // a scored query ranks by relevance; anything else stays newest-first.
-  const plain = query.mode === 'empty';
-  let orderBy;
-  let orderParams;
-  if (scored) {
-    orderBy = 'ORDER BY score DESC, p.created_at DESC, p.rowid DESC';
-    orderParams = [];
-  } else if (plain || query.mode === 'department') {
-    orderBy = `ORDER BY ${STATUS_RANK}, p.created_at DESC, p.rowid DESC`;
-    orderParams = [today, today];
-  } else {
-    orderBy = 'ORDER BY p.created_at DESC, p.rowid DESC';
-    orderParams = [];
-  }
+  const groupOrderBy = scored
+    ? `ORDER BY MAX(${scoreExpr}) DESC, store_count DESC, n DESC, gk ASC`
+    : 'ORDER BY store_count DESC, n DESC, gk ASC';
 
-  const rows = db
+  const groupRows = db
     .prepare(
-      `SELECT ${PRODUCT_COLS}${scored ? `, (${scoreExpr}) AS score` : ''}
+      `SELECT ${GROUP_KEY} AS gk,
+              COUNT(DISTINCT f.store) AS store_count,
+              COUNT(*) AS n
+         ${FROM}
+         ${clause}
+        GROUP BY gk
+        ${groupOrderBy}
+        LIMIT ? OFFSET ?`,
+    )
+    // bind order = statement text: WHERE, ORDER (score), LIMIT/OFFSET
+    .all(...params, ...(scored ? scoreBinds : []), lim, off);
+
+  const groupKeys = groupRows.map(r => r.gk);
+
+  const productRows = db
+    .prepare(
+      `SELECT ${PRODUCT_COLS}, ${GROUP_KEY} AS gk
          FROM products p
          JOIN flyers f ON f.id = p.flyer_id
          ${CANONICAL_JOIN}
-         ${clause}
-        ${orderBy}
-        LIMIT ? OFFSET ?`,
+         ${andWhere(clause, `${GROUP_KEY} IN (${groupKeys.map(() => '?').join(',')})`)}
+        ORDER BY gk, (p.price_value IS NULL), p.price_value ASC, f.store ASC`,
     )
-    // bind order = statement text: SELECT score, WHERE, ORDER (status), LIMIT/OFFSET
-    .all(...scoreBinds, ...params, ...orderParams, lim, off);
+    // bind order = statement text: WHERE, group-key IN list
+    .all(...params, ...groupKeys);
 
-  const products = rows.map(r => mapProductRow(r, baseUrl));
-  const pages = collectPages(products, baseUrl);
+  const byGroup = new Map();
+  for (const row of productRows) {
+    const product = mapProductRow(row, baseUrl);
+    const list = byGroup.get(row.gk);
+    if (list) {
+      list.push(product);
+    } else {
+      byGroup.set(row.gk, [product]);
+    }
+  }
 
-  return {products, pages, total, hasMore: off + rows.length < total};
+  const groups = groupRows.map(r => {
+    const products = byGroup.get(r.gk) || [];
+    const label = titleCaseName(products[0]?.canonicalName || products[0]?.name || '');
+    return {groupKey: String(r.gk), label, storeCount: r.store_count, products};
+  });
+
+  return {
+    groups,
+    pages: collectPages(
+      groups.flatMap(g => g.products),
+      baseUrl,
+    ),
+    totalGroups,
+    totalProducts,
+    hasMore: off + groupRows.length < totalGroups,
+  };
 }
 
 /** Broad words that would blow a query wide open — dropped before searching. */
