@@ -41,7 +41,8 @@ one page and is preceded by a line like "=== PAGE 3 ===" giving its page number.
 Extract EVERY distinct product across ALL pages shown into one JSON array — be
 exhaustive, do not skip items even on a crowded page, do not stop early.`;
 
-const PROMPT_FIELDS = `Flyer tiles sit close together. Read every field for a product ONLY from text
+function promptFields(year) {
+  return `Flyer tiles sit close together. Read every field for a product ONLY from text
 that is physically inside that product's own tile — never borrow the name,
 price, size or SKU from a neighbouring tile. If a field is not clearly inside
 this tile, leave it empty / 0 rather than guessing.
@@ -99,6 +100,17 @@ For each product:
   cleaning"; paper towels/toilet paper/napkins -> "paper goods";
   shampoo/deodorant/makeup -> "beauty & personal care"; vitamins/medicine/first
   aid -> "health & wellness". Use "other" only when nothing else fits.
+- "flyerValidFrom" / "flyerValidTo": ONLY if THIS PAGE prints the FLYER'S
+  OVERALL price-effective date range — a statement like "Flyer prices
+  effective from Thursday, September 17th to Wednesday, September 23rd,
+  2026", "Valid Aug 28 – Sep 3", "Sale dates 08/28–09/03" — as
+  "YYYY-MM-DD". Take the START/END of that range. If the year isn't printed,
+  use ${year}; but if that puts it more than ~2 months in the FUTURE, use
+  ${year - 1} instead. Put the SAME two values on every product extracted
+  from this page. Do NOT use a single item's own limited-time promo date
+  ("ONE DAY ONLY FRIDAY", a specific deal's cutoff, a coupon expiry) — only
+  the flyer-wide statement, and only when it is clearly printed, never
+  guessed. Empty string for both when this page doesn't state it.
 
 One price shared by two products: if a single price clearly covers TWO OR MORE
 distinct products in the same tile (different product lines — e.g. "Tylenol Extra
@@ -111,6 +123,7 @@ photo and label. If instead it is ONE product line shown as several package shot
 one box enclosing all its shots.
 
 Return [] if there are no products.`;
+}
 
 // --- Flyer-level metadata (store + validity window) --------------------------
 // A separate, cheap call against page 1 only. Kept out of the per-product schema
@@ -160,6 +173,21 @@ function cleanDate(value) {
   return Number.isNaN(d.getTime()) || d.toISOString().slice(0, 10) !== s
     ? ''
     : s;
+}
+
+// Shared by the page-1 flyer-meta call and the per-page fallback below: clean
+// a raw (from, to) date pair, filling a missing `to` from `from` (a one-day
+// sale) and swapping the two if they came back reversed.
+function cleanDateRange(rawFrom, rawTo) {
+  let validFrom = cleanDate(rawFrom);
+  let validTo = cleanDate(rawTo);
+  if (validFrom && !validTo) {
+    validTo = validFrom;
+  }
+  if (validFrom && validTo && validTo < validFrom) {
+    [validFrom, validTo] = [validTo, validFrom];
+  }
+  return {validFrom, validTo};
 }
 
 /**
@@ -216,18 +244,9 @@ export async function extractFlyerMeta(page1Jpeg) {
   try {
     const v = JSON.parse(text) || {};
     const confidence = Number(v.confidence);
-    let validFrom = cleanDate(v.validFrom);
-    let validTo = cleanDate(v.validTo);
-    if (validFrom && !validTo) {
-      validTo = validFrom;
-    }
-    if (validFrom && validTo && validTo < validFrom) {
-      [validFrom, validTo] = [validTo, validFrom];
-    }
     meta = {
       store: normalizeStore(v.store).slice(0, 120),
-      validFrom,
-      validTo,
+      ...cleanDateRange(v.validFrom, v.validTo),
       confidence: isFinite(confidence)
         ? Math.max(0, Math.min(100, Math.round(confidence)))
         : null,
@@ -256,6 +275,8 @@ const RESPONSE_SCHEMA = {
       category: {type: 'STRING'},
       tags: {type: 'ARRAY', items: {type: 'STRING'}},
       department: {type: 'STRING', enum: DEPARTMENTS},
+      flyerValidFrom: {type: 'STRING'},
+      flyerValidTo: {type: 'STRING'},
     },
     required: [
       'page',
@@ -270,6 +291,8 @@ const RESPONSE_SCHEMA = {
       'category',
       'tags',
       'department',
+      'flyerValidFrom',
+      'flyerValidTo',
     ],
   },
 };
@@ -512,7 +535,7 @@ async function extractBatch(batch, apiKey, model) {
     parts.push({text: `=== PAGE ${p.page} ===`});
     parts.push({inline_data: {mime_type: 'image/jpeg', data: p.jpeg}});
   }
-  parts.push({text: PROMPT_FIELDS});
+  parts.push({text: promptFields(new Date().getFullYear())});
 
   const json = await callGemini(
     {
@@ -553,10 +576,20 @@ async function extractBatch(batch, apiKey, model) {
 
   const items = parseProductArray(text, pageNums.join(', '), finishReason);
   const fallbackPage = pageNums[0];
+  // A page's flyer-wide effective-dates statement, if it printed one — the
+  // same cleanup rules as the dedicated page-1 meta call, just sourced from
+  // this page-extraction call instead of a second Gemini request.
+  const pageDatesByPage = new Map();
   const products = items.map(p => {
     let page = parseInt(p.page, 10);
     if (!pageNums.includes(page)) {
       page = fallbackPage;
+    }
+    if (!pageDatesByPage.has(page)) {
+      const range = cleanDateRange(p.flyerValidFrom, p.flyerValidTo);
+      if (range.validFrom && range.validTo) {
+        pageDatesByPage.set(page, range);
+      }
     }
     const priceValue =
       typeof p.priceValue === 'number' ? p.priceValue : Number(p.priceValue);
@@ -587,7 +620,9 @@ async function extractBatch(batch, apiKey, model) {
     };
   });
 
-  return {products, usage: readUsage(json)};
+  const pageDates = [...pageDatesByPage].map(([page, range]) => ({page, ...range}));
+
+  return {products, usage: readUsage(json), pageDates};
 }
 
 async function appendUsageLog(entry) {
@@ -604,7 +639,12 @@ async function appendUsageLog(entry) {
  * @param {{ onPage?: (pagesDone: number) => void }} [opts]  `onPage` fires once
  *   per page as its batch finishes (success or failure) — the upload's
  *   progress signal.
- * @returns {Promise<{ products: Array<object>, usage: object }>}
+ * @returns {Promise<{ products: Array<object>, usage: object, pageDates:
+ *   Array<{ page: number, validFrom: string, validTo: string }> }>}
+ *   `pageDates` is every page that printed the flyer's own effective-dates
+ *   statement (most won't have one) — the fallback source when the
+ *   dedicated page-1 meta call (extractFlyerMeta) comes up empty, at no
+ *   extra Gemini cost since these pages are extracted for products anyway.
  */
 export async function extractFlyer(pages, {onPage} = {}) {
   // Offline smoke-test path (GEMINI_API_KEY=MOCK) — exercises render -> POST ->
@@ -659,7 +699,7 @@ export async function extractFlyer(pages, {onPage} = {}) {
         box: [j * 300 + 40, 40, j * 300 + 280, 470],
       })),
     );
-    return {products, usage: {calls: 0, mock: true}};
+    return {products, usage: {calls: 0, mock: true}, pageDates: []};
   }
 
   const {apiKey, model} = config();
@@ -668,6 +708,7 @@ export async function extractFlyer(pages, {onPage} = {}) {
   const results = new Array(batches.length);
   const requests = new Array(batches.length);
   const failedPages = [];
+  const pageDatesFound = [];
   let next = 0;
 
   async function worker() {
@@ -682,8 +723,9 @@ export async function extractFlyer(pages, {onPage} = {}) {
 
       let products;
       let usage;
+      let pageDates;
       try {
-        ({products, usage} = await extractBatch(batch, apiKey, model));
+        ({products, usage, pageDates} = await extractBatch(batch, apiKey, model));
       } catch (err) {
         // One bad page shouldn't lose the whole flyer — record it and move on.
         failedPages.push(...batch.map(p => p.page));
@@ -701,6 +743,7 @@ export async function extractFlyer(pages, {onPage} = {}) {
         ...usage,
       };
       results[i] = products;
+      pageDatesFound.push(...pageDates);
       onPage?.(batch.length);
 
       console.log(
@@ -783,6 +826,7 @@ export async function extractFlyer(pages, {onPage} = {}) {
       total,
       failedPages,
     },
+    pageDates: pageDatesFound,
   };
 }
 

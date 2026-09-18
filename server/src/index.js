@@ -219,7 +219,7 @@ function startJob(hash, {buffer, name, rendered, maxPages}) {
 
 async function runExtraction({buffer, name, hash, rendered, maxPages, onPage}) {
   const t0 = Date.now();
-  const [{products, usage}, metaResult] = await Promise.all([
+  const [{products, usage, pageDates}, metaResult] = await Promise.all([
     extractFlyer(rendered.pages.map(p => ({page: p.page, jpeg: p.jpegBase64})), {
       onPage,
     }),
@@ -229,9 +229,33 @@ async function runExtraction({buffer, name, hash, rendered, maxPages, onPage}) {
     }),
   ]);
 
-  const meta = metaResult?.meta ?? null;
-  if (metaResult) {
-    const mu = metaResult.usage || {};
+  let meta = metaResult?.meta ?? null;
+  // Page 1 doesn't always carry the flyer's effective-dates line (it can be a
+  // teaser/highlights page instead of the masthead) — fall back to whichever
+  // OTHER page's product-extraction call spotted that statement, no extra
+  // Gemini call needed since every page is already extracted for products.
+  // Take the lowest-numbered page that has one; leave store/confidence as
+  // page 1 found them.
+  if (!meta?.validFrom || !meta?.validTo) {
+    const fallback = pageDates
+      .filter(d => d.validFrom && d.validTo)
+      .sort((a, b) => a.page - b.page)[0];
+    if (fallback) {
+      console.log(
+        `[gemini] flyer-meta  page 1 had no dates — using page ${fallback.page}'s ` +
+          `${fallback.validFrom}..${fallback.validTo} instead`,
+      );
+      meta = {
+        store: meta?.store || '',
+        validFrom: fallback.validFrom,
+        validTo: fallback.validTo,
+        confidence: meta?.confidence ?? null,
+      };
+    }
+  }
+
+  if (meta) {
+    const mu = metaResult?.usage || {};
     console.log(
       `[gemini] flyer-meta  store=${JSON.stringify(meta.store)}  ` +
         `valid=${meta.validFrom || '?'}..${meta.validTo || '?'}  ` +
