@@ -125,6 +125,42 @@ db.exec(`
   );
   CREATE INDEX IF NOT EXISTS idx_products_created ON products(created_at DESC);
   CREATE INDEX IF NOT EXISTS idx_products_department ON products(department);
+  CREATE INDEX IF NOT EXISTS idx_flyers_valid ON flyers(valid_from, valid_to);
+
+  -- A "canonical product" is the real-world item (e.g. "strawberries") that
+  -- many products rows — one per flyer sighting, possibly with a different
+  -- category string each time — get linked to via products.canonical_product_id.
+  -- This is what makes price history / trends / deal-quality possible: those
+  -- features group sightings by canonical product, not by raw category text.
+  CREATE TABLE IF NOT EXISTS canonical_products (
+    id             TEXT PRIMARY KEY,
+    canonical_name TEXT NOT NULL,
+    category       TEXT,
+    department     TEXT,
+    tags           TEXT,
+    created_at     TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_canonical_department ON canonical_products(department);
+
+  -- Anonymous per-install identity (no login) — just enough to own alerts.
+  CREATE TABLE IF NOT EXISTS users (
+    id         TEXT PRIMARY KEY,
+    created_at TEXT NOT NULL
+  );
+
+  CREATE TABLE IF NOT EXISTS price_alerts (
+    id                   TEXT PRIMARY KEY,
+    user_id              TEXT NOT NULL REFERENCES users(id),
+    canonical_product_id TEXT NOT NULL REFERENCES canonical_products(id),
+    target_price         REAL NOT NULL,
+    comparison           TEXT NOT NULL DEFAULT 'lte',
+    store                TEXT,
+    created_at           TEXT NOT NULL,
+    resolved_at          TEXT,
+    resolved_product_id  TEXT
+  );
+  CREATE INDEX IF NOT EXISTS idx_alerts_canonical ON price_alerts(canonical_product_id);
+  CREATE INDEX IF NOT EXISTS idx_alerts_user ON price_alerts(user_id);
 `);
 
 // Backfill columns onto a database created before they existed.
@@ -139,6 +175,7 @@ for (const [table, col] of [
   ['products', 'was_price TEXT'],
   ['products', 'promo_text TEXT'],
   ['products', 'on_sale INTEGER NOT NULL DEFAULT 0'],
+  ['products', 'canonical_product_id TEXT REFERENCES canonical_products(id)'],
 ]) {
   try {
     db.exec(`ALTER TABLE ${table} ADD COLUMN ${col}`);
@@ -146,6 +183,11 @@ for (const [table, col] of [
     // already there
   }
 }
+
+// Only safe to create once the ALTER above has run on an old DB.
+db.exec(
+  'CREATE INDEX IF NOT EXISTS idx_products_canonical ON products(canonical_product_id)',
+);
 
 const stmts = {
   flyerByHash: db.prepare('SELECT * FROM flyers WHERE hash = ?'),
@@ -205,6 +247,74 @@ const stmts = {
   productsForFlyer: db.prepare(
     'SELECT COUNT(*) AS n FROM products WHERE flyer_id = ?',
   ),
+
+  // --- canonical products (cross-flyer product identity) -------------------
+  missingCanonical: db.prepare(
+    `SELECT p.id, p.name, p.info, p.category, p.tags, p.department,
+            p.price_value, f.store
+       FROM products p JOIN flyers f ON f.id = p.flyer_id
+      WHERE p.canonical_product_id IS NULL
+        AND p.category IS NOT NULL AND p.category <> ''
+        AND p.department IS NOT NULL AND p.department <> ''
+      ORDER BY p.rowid
+      LIMIT ?`,
+  ),
+  insertCanonicalProduct: db.prepare(
+    `INSERT INTO canonical_products (id, canonical_name, category, department, tags, created_at)
+     VALUES (@id, @canonical_name, @category, @department, @tags, @created_at)`,
+  ),
+  updateProductCanonical: db.prepare(
+    'UPDATE products SET canonical_product_id = @canonical_product_id WHERE id = @id',
+  ),
+  canonicalExactCategory: db.prepare(
+    `SELECT id, canonical_name, category FROM canonical_products
+      WHERE department = @department AND lower(canonical_name) = @category
+      LIMIT 5`,
+  ),
+  canonicalHeadMatch: db.prepare(
+    `SELECT id, canonical_name, category FROM canonical_products
+      WHERE department = @department AND headmatch(lower(canonical_name), @needle)
+      LIMIT 5`,
+  ),
+  canonicalTagMatch: db.prepare(
+    `SELECT id, canonical_name, category FROM canonical_products
+      WHERE department = @department AND tagexact(coalesce(tags,''), @needle)
+      LIMIT 5`,
+  ),
+
+  // --- users / alerts --------------------------------------------------------
+  insertUserIgnore: db.prepare(
+    'INSERT OR IGNORE INTO users (id, created_at) VALUES (@id, @created_at)',
+  ),
+  insertAlert: db.prepare(
+    `INSERT INTO price_alerts
+       (id, user_id, canonical_product_id, target_price, comparison, store, created_at)
+     VALUES
+       (@id, @user_id, @canonical_product_id, @target_price, @comparison, @store, @created_at)`,
+  ),
+  listAlertsByUser: db.prepare(
+    `SELECT a.id, a.canonical_product_id, cp.canonical_name, a.target_price,
+            a.comparison, a.store, a.created_at, a.resolved_at, a.resolved_product_id
+       FROM price_alerts a JOIN canonical_products cp ON cp.id = a.canonical_product_id
+      WHERE a.user_id = @user_id
+      ORDER BY (a.resolved_at IS NOT NULL), a.created_at DESC`,
+  ),
+  openAlertsForCanonical: db.prepare(
+    `SELECT id, target_price, comparison, store FROM price_alerts
+      WHERE canonical_product_id = @canonical_product_id AND resolved_at IS NULL`,
+  ),
+  resolveAlert: db.prepare(
+    `UPDATE price_alerts SET resolved_at = @resolved_at, resolved_product_id = @resolved_product_id
+      WHERE id = @id`,
+  ),
+  deleteOpenAlertsForUserProduct: db.prepare(
+    `DELETE FROM price_alerts
+      WHERE user_id = @user_id AND canonical_product_id = @canonical_product_id
+        AND resolved_at IS NULL`,
+  ),
+  deleteOpenAlertsForUser: db.prepare(
+    `DELETE FROM price_alerts WHERE user_id = @user_id AND resolved_at IS NULL`,
+  ),
 };
 
 export function findFlyerByHash(hash) {
@@ -213,6 +323,20 @@ export function findFlyerByHash(hash) {
 
 export function productCountForFlyer(flyerId) {
   return stmts.productsForFlyer.get(flyerId).n;
+}
+
+/** Every distinct retailer name currently stored — for the store-name backfill. */
+export function distinctStores() {
+  return db
+    .prepare("SELECT DISTINCT store FROM flyers WHERE store IS NOT NULL AND store <> ''")
+    .all()
+    .map(r => r.store);
+}
+
+/** Rewrite every flyer carrying `oldValue` as its store to `newValue`. Returns the row count changed. */
+export function renameStore(oldValue, newValue) {
+  return db.prepare('UPDATE flyers SET store = ? WHERE store = ?').run(newValue, oldValue)
+    .changes;
 }
 
 /**
@@ -347,6 +471,468 @@ export function departmentCounts() {
   }));
 }
 
+// ---------------------------------------------------------------------------
+// Canonical products — the cross-flyer identity layer. Every `products` row is
+// a "sighting" (one flyer, one date, one store, one price) of a canonical
+// product; price history / deal-quality / trends all group by
+// canonical_product_id instead of the raw (per-flyer, free-text) category.
+// ---------------------------------------------------------------------------
+
+/** Products not yet linked to a canonical product — for the matching pass. */
+export function productsMissingCanonical(limit = 40) {
+  return stmts.missingCanonical.all(Math.max(1, Math.min(200, Number(limit) || 40)));
+}
+
+/**
+ * A cheap SQL shortlist of existing canonical products this one might be —
+ * same department only (never merge across departments), ranked by how the
+ * product's `category` relates to each candidate's `canonical_name`/`tags`
+ * using the same UDFs the Search tab already matches queries with.
+ *
+ * `category` text alone is NOT a safe identity signal — categories are
+ * brand-stripped, so "Lay's chips", "Pringles Snack Stacks" and a 16-pack of
+ * Frito-Lay variety bags can all share `category: "chips"` while being
+ * completely different products at completely different prices. So this only
+ * ever narrows the field; every candidate still goes to Gemini (which sees
+ * the full product NAME) to confirm — see matchCanonicalProducts / db.js
+ * canonicalMatch.js. No auto-link path exists on purpose.
+ */
+export function canonicalCandidatesForProduct(
+  {category, department},
+  limit = 5,
+) {
+  const dept = department || '';
+  const cat = (category || '').toLowerCase().trim();
+  if (!dept || !cat) {
+    return [];
+  }
+
+  const seen = new Map();
+  const add = rows => {
+    for (const r of rows) {
+      if (!seen.has(r.id)) {
+        seen.set(r.id, r);
+      }
+    }
+  };
+  add(stmts.canonicalExactCategory.all({department: dept, category: cat}));
+  add(stmts.canonicalHeadMatch.all({department: dept, needle: cat}));
+  add(stmts.canonicalTagMatch.all({department: dept, needle: cat}));
+
+  return [...seen.values()].slice(0, limit).map(r => ({
+    id: r.id,
+    canonicalName: r.canonical_name,
+    category: r.category || '',
+  }));
+}
+
+/**
+ * Write canonical-product matches. Each entry is either
+ * `{ productId, canonicalId, priceValue, store }` (links to an existing
+ * canonical product) or `{ productId, newCanonical: {canonicalName, category,
+ * department, tags}, priceValue, store }` (creates one first). Also resolves
+ * any open price alert on that canonical product this sighting's price
+ * satisfies. Returns `{ createdCount }`.
+ */
+export const applyCanonicalMatches = db.transaction(matches => {
+  let createdCount = 0;
+  const now = new Date().toISOString();
+
+  for (const m of matches) {
+    let canonicalId = m.canonicalId || null;
+    if (!canonicalId && m.newCanonical) {
+      canonicalId = randomUUID();
+      const nc = m.newCanonical;
+      stmts.insertCanonicalProduct.run({
+        id: canonicalId,
+        canonical_name: nc.canonicalName,
+        category: nc.category || null,
+        department: nc.department || null,
+        tags: nc.tags && nc.tags.length ? JSON.stringify(nc.tags) : null,
+        created_at: now,
+      });
+      createdCount++;
+    }
+    if (!canonicalId) {
+      continue;
+    }
+
+    stmts.updateProductCanonical.run({id: m.productId, canonical_product_id: canonicalId});
+
+    if (m.priceValue == null) {
+      continue;
+    }
+    for (const a of stmts.openAlertsForCanonical.all({
+      canonical_product_id: canonicalId,
+    })) {
+      if (a.store && m.store && a.store.toLowerCase() !== String(m.store).toLowerCase()) {
+        continue;
+      }
+      const hit =
+        a.comparison === 'lt' ? m.priceValue < a.target_price : m.priceValue <= a.target_price;
+      if (hit) {
+        stmts.resolveAlert.run({
+          id: a.id,
+          resolved_at: now,
+          resolved_product_id: m.productId,
+        });
+      }
+    }
+  }
+
+  return {createdCount};
+});
+
+/** "YYYY-MM-DD" `n` days before today. */
+function daysAgoIso(n) {
+  const d = new Date();
+  d.setDate(d.getDate() - n);
+  const p = x => String(x).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+}
+
+function daysBetween(fromIso, toIso) {
+  const a = new Date(`${fromIso}T00:00:00Z`).getTime();
+  const b = new Date(`${toIso}T00:00:00Z`).getTime();
+  return Math.round((b - a) / 86400000);
+}
+
+function median(nums) {
+  const s = [...nums].sort((a, b) => a - b);
+  const mid = Math.floor(s.length / 2);
+  return s.length % 2 ? s[mid] : (s[mid - 1] + s[mid]) / 2;
+}
+
+/**
+ * Chronological price sightings for one canonical product — or, given an
+ * array, pooled across several (used to answer a generic ask like "tomatoes"
+ * over every tomato variety at once rather than one arbitrary one) —
+ * optionally narrowed to one store or the last `months` months.
+ */
+export function priceHistory(canonicalProductIdOrIds, {store, months} = {}) {
+  const ids = Array.isArray(canonicalProductIdOrIds)
+    ? canonicalProductIdOrIds
+    : [canonicalProductIdOrIds];
+  if (!ids.length) {
+    return [];
+  }
+  const conds = [`p.canonical_product_id IN (${ids.map(() => '?').join(',')})`];
+  const params = [...ids];
+  if (store) {
+    conds.push('f.store = ?');
+    params.push(store);
+  }
+  if (months) {
+    conds.push('(f.valid_from IS NULL OR f.valid_from = \'\' OR f.valid_from >= ?)');
+    params.push(daysAgoIso(Math.round(Number(months) * 30.44)));
+  }
+
+  const rows = db
+    .prepare(
+      `SELECT p.price, p.price_value, p.on_sale, f.store, f.valid_from, f.valid_to,
+              p.flyer_id, p.page
+         FROM products p JOIN flyers f ON f.id = p.flyer_id
+        WHERE ${conds.join(' AND ')}
+        ORDER BY f.valid_from ASC, p.created_at ASC`,
+    )
+    .all(...params);
+
+  return rows.map(r => ({
+    price: r.price || '',
+    priceValue: r.price_value,
+    onSale: !!r.on_sale,
+    store: r.store || '',
+    validFrom: r.valid_from || '',
+    validTo: r.valid_to || '',
+    flyerId: r.flyer_id,
+    page: r.page,
+  }));
+}
+
+/**
+ * How a flyer price is actually priced — "$3.17/lb" and "$5.99/3 lb" and
+ * "$4.99 each" and "2/$7" are NOT directly comparable dollar figures even
+ * though `price_value` is just a plain number for all four ("carrots" has
+ * real sightings at 94¢/lb, $1.99, and $2.44 — mixing per-pound and flat
+ * pricing under one price trend). Returns a short key: "<n>lb"/"<n>kg" for a
+ * per-weight price (n = the pound/kilogram count it's priced per, 1 if none
+ * is printed), "multi<n>" for a "n/$X" multi-buy, else "flat" (a plain
+ * per-item/package price).
+ */
+function priceBasis(priceText) {
+  const s = String(priceText || '').toLowerCase();
+  // "$5.99/3 lb", "/3kg" — an explicit weight count right after the slash.
+  let m = s.match(/\/\s*(\d+(?:\.\d+)?)\s*(lbs?|pounds?|kgs?|kilograms?)\b/);
+  if (m) {
+    return `${m[1]}${m[2].startsWith('k') ? 'kg' : 'lb'}`;
+  }
+  // "$3.17/lb", "$11.98 lb" — per a single lb/kg, no count printed.
+  m = s.match(/\b(lbs?|pounds?|kgs?|kilograms?)\b/);
+  if (m) {
+    return `1${m[1].startsWith('k') ? 'kg' : 'lb'}`;
+  }
+  // "2/$7", "3 for $4" — a multi-buy count.
+  m = s.match(/(\d+)\s*\/\s*\$|(\d+)\s*for\s*\$/);
+  if (m) {
+    return `multi${m[1] || m[2]}`;
+  }
+  return 'flat';
+}
+
+/**
+ * Deal-quality / lowest-price / trend / retailer-compare / sale-frequency, all
+ * derived from the same sighting history — one aggregate so the client and the
+ * chat agent can each pull whichever field they need. Accepts one canonical
+ * product id or (to answer a generic ask across several varieties) an array.
+ * Returns `null` when there's no history at all.
+ */
+export function priceInsight(canonicalProductIdOrIds, {store} = {}) {
+  const history = priceHistory(canonicalProductIdOrIds, {store});
+  const priced = history.filter(h => h.priceValue != null);
+  if (!priced.length) {
+    return null;
+  }
+
+  const current = priced[priced.length - 1];
+  const windowCutoff = daysAgoIso(90);
+  const windowRows = priced.filter(h => !h.validFrom || h.validFrom >= windowCutoff);
+  const windowSightings = windowRows.length ? windowRows : priced;
+  // The sighting where the 90-day low actually happened — `windowSightings`
+  // is already date-ordered (priceHistory sorts by valid_from ASC), and `<=`
+  // keeps the LATEST tie, so "when was it lowest" answers with the most
+  // recent time that price was seen, not the first.
+  const minSighting = windowSightings.reduce((best, h) =>
+    h.priceValue <= best.priceValue ? h : best,
+  );
+  const min90d = minSighting.priceValue;
+  const median90d = median(windowSightings.map(h => h.priceValue));
+
+  // A single sighting is only ever "today's own price" — with nothing else to
+  // compare it against, don't claim a deal quality at all (it would otherwise
+  // always compute as "great", since a lone price trivially equals its own
+  // min/median).
+  let dealQuality = null;
+  if (priced.length >= 2) {
+    if (current.priceValue <= min90d * 1.05) {
+      dealQuality = 'great';
+    } else if (current.priceValue <= median90d) {
+      dealQuality = 'good';
+    } else if (current.priceValue <= median90d * 1.15) {
+      dealQuality = 'average';
+    } else {
+      dealQuality = 'poor';
+    }
+  }
+
+  const isLowestInMonths = months => {
+    const cutoff = daysAgoIso(Math.round(months * 30.44));
+    const inWindow = priced.filter(h => !h.validFrom || h.validFrom >= cutoff);
+    // Same reasoning as dealQuality — need at least one OTHER sighting in the
+    // window, or "lowest in N months" is trivially true of the only price.
+    return (
+      inWindow.length >= 2 &&
+      current.priceValue <= Math.min(...inWindow.map(h => h.priceValue))
+    );
+  };
+
+  const saleDates = [...new Set(priced.filter(h => h.onSale && h.validFrom).map(h => h.validFrom))].sort();
+  let saleFrequencyDays = null;
+  if (saleDates.length >= 2) {
+    const gaps = saleDates.slice(1).map((d, i) => daysBetween(saleDates[i], d));
+    saleFrequencyDays = Math.round(median(gaps));
+  }
+
+  const byStoreMap = new Map();
+  for (const h of priced) {
+    if (!h.store) {
+      continue;
+    }
+    const entry = byStoreMap.get(h.store) || {
+      store: h.store,
+      latestPrice: null,
+      latestDate: '',
+      lowestPrice: null,
+    };
+    if (!entry.latestDate || h.validFrom >= entry.latestDate) {
+      entry.latestDate = h.validFrom;
+      entry.latestPrice = h.priceValue;
+    }
+    if (entry.lowestPrice == null || h.priceValue < entry.lowestPrice) {
+      entry.lowestPrice = h.priceValue;
+    }
+    byStoreMap.set(h.store, entry);
+  }
+
+  return {
+    currentPrice: current.priceValue,
+    min90d,
+    // The flyer week the 90-day low actually happened, and where — so "when
+    // was it lowest" has an answer, not just a number.
+    min90dValidFrom: minSighting.validFrom || null,
+    min90dValidTo: minSighting.validTo || null,
+    min90dStore: minSighting.store || null,
+    median90d,
+    isLowestIn3Months: isLowestInMonths(3),
+    isLowestIn6Months: isLowestInMonths(6),
+    isLowestIn12Months: isLowestInMonths(12),
+    dealQuality,
+    saleFrequencyDays,
+    byStore: [...byStoreMap.values()].map(({store: s, latestPrice, lowestPrice}) => ({
+      store: s,
+      latestPrice,
+      lowestPrice,
+    })),
+    sightings: history.length,
+    // True when these sightings aren't all priced the same way (some per lb/
+    // kg, some flat, some a multi-buy) — the comparison above may not be
+    // apples-to-apples even though every priceValue is just a plain number.
+    mixedPriceUnits: new Set(priced.map(h => priceBasis(h.price))).size > 1,
+  };
+}
+
+/**
+ * Resolve a loose product hint ("tomatoes", "chicken breast") to the
+ * canonical product(s) it names, most-sighted first.
+ *
+ * A generic ask means the actual item — never something that merely mentions
+ * it as an ingredient. So the primary tier only ever matches on real product
+ * identity: a canonical group's own name ending in the hint ("tomatoes" ->
+ * "field tomatoes", "grape tomatoes", ... — ALL of them, so priceInsight can
+ * pool every variety into one "tomatoes in general" answer instead of an
+ * arbitrary pick), or — for a group filed under a different name (e.g. "roma
+ * tomatoes" grouped as "roma tomatoes green sweet") — a linked product's own
+ * category/name.
+ *
+ * `broad: true` (an explicit "products WITH tomatoes" / ingredient-style ask)
+ * additionally unions in anything carrying the hint as a complete TAG, so a
+ * pasta sauce that lists tomatoes as one ingredient can be included too —
+ * added on top of the real-item matches, never in place of them, and never
+ * for a plain generic ask.
+ *
+ * Returns `[]` if nothing matches.
+ */
+export function resolveCanonicalIds(hint, {broad = false} = {}) {
+  const h = String(hint || '').trim().toLowerCase();
+  if (!h) {
+    return [];
+  }
+
+  const byNameHead = db
+    .prepare(
+      `SELECT cp.id, COUNT(p.id) AS n
+         FROM canonical_products cp
+         LEFT JOIN products p ON p.canonical_product_id = cp.id
+        WHERE headmatch(lower(cp.canonical_name), ?)
+        GROUP BY cp.id
+        ORDER BY n DESC`,
+    )
+    .all(h);
+
+  const itemIds = byNameHead.length
+    ? byNameHead.map(r => r.id)
+    : db
+        .prepare(
+          `SELECT p.canonical_product_id AS id, COUNT(*) AS n
+             FROM products p
+            WHERE p.canonical_product_id IS NOT NULL
+              AND (headmatch(lower(coalesce(p.category,'')), ?)
+                   OR wordmatch(lower(coalesce(p.name,'') || ' ' || coalesce(p.info,'')), ?))
+            GROUP BY p.canonical_product_id
+            ORDER BY n DESC`,
+        )
+        .all(h, h)
+        .map(r => r.id);
+
+  if (!broad) {
+    return itemIds;
+  }
+
+  const byTag = db
+    .prepare(
+      `SELECT cp.id, COUNT(p.id) AS n
+         FROM canonical_products cp
+         LEFT JOIN products p ON p.canonical_product_id = cp.id
+        WHERE tagexact(coalesce(cp.tags,''), ?)
+        GROUP BY cp.id
+        ORDER BY n DESC`,
+    )
+    .all(h)
+    .map(r => r.id);
+  const byProductTag = db
+    .prepare(
+      `SELECT p.canonical_product_id AS id, COUNT(*) AS n
+         FROM products p
+        WHERE p.canonical_product_id IS NOT NULL AND tagexact(coalesce(p.tags,''), ?)
+        GROUP BY p.canonical_product_id
+        ORDER BY n DESC`,
+    )
+    .all(h)
+    .map(r => r.id);
+
+  return [...new Set([...itemIds, ...byTag, ...byProductTag])];
+}
+
+/** The single best canonical product for a hint (item-scope only) — for a
+ * context like a price alert that needs exactly one target. */
+export function resolveCanonicalId(hint) {
+  return resolveCanonicalIds(hint, {broad: false})[0] ?? null;
+}
+
+// ---------------------------------------------------------------------------
+// Users + price alerts. No login — the client generates an anonymous
+// per-install id; these rows just give alerts somewhere to live.
+// ---------------------------------------------------------------------------
+
+/** Ensures a user row exists (no-op if it already does). */
+export function getOrCreateUser(userId) {
+  stmts.insertUserIgnore.run({id: userId, created_at: new Date().toISOString()});
+  return userId;
+}
+
+export function createAlert({userId, canonicalProductId, targetPrice, comparison, store}) {
+  const id = randomUUID();
+  stmts.insertAlert.run({
+    id,
+    user_id: userId,
+    canonical_product_id: canonicalProductId,
+    target_price: targetPrice,
+    comparison: comparison === 'lt' ? 'lt' : 'lte',
+    store: store || null,
+    created_at: new Date().toISOString(),
+  });
+  return id;
+}
+
+export function listAlerts(userId) {
+  return stmts.listAlertsByUser.all({user_id: userId}).map(r => ({
+    id: r.id,
+    canonicalProductId: r.canonical_product_id,
+    canonicalName: r.canonical_name,
+    targetPrice: r.target_price,
+    comparison: r.comparison,
+    store: r.store || '',
+    createdAt: r.created_at,
+    resolvedAt: r.resolved_at || null,
+    resolvedProductId: r.resolved_product_id || null,
+  }));
+}
+
+/**
+ * Cancels (deletes) a user's still-open price alerts — a resolved/matched
+ * alert is left alone, since there's nothing left to "cancel". Pass
+ * `canonicalProductId` to cancel just that product's alerts, or omit it to
+ * cancel everything open for the user. Returns how many were removed.
+ */
+export function cancelAlerts({userId, canonicalProductId}) {
+  const result = canonicalProductId
+    ? stmts.deleteOpenAlertsForUserProduct.run({
+        user_id: userId,
+        canonical_product_id: canonicalProductId,
+      })
+    : stmts.deleteOpenAlertsForUser.run({user_id: userId});
+  return result.changes;
+}
+
 function safeJsonArray(s) {
   try {
     const v = JSON.parse(s);
@@ -374,8 +960,30 @@ function titleCaseName(name) {
 
 export const STATUSES = ['valid', 'upcoming', 'expired', 'unknown'];
 
+// When the caller hasn't explicitly chosen statuses, the search tab should
+// default to hiding expired flyers rather than showing everything.
+const DEFAULT_VISIBLE_STATUSES = STATUSES.filter(s => s !== 'expired');
+
+/**
+ * `statuses` as given, or the default "everything but expired" when empty —
+ * with `expired` folded back in when `includeExpired` is set, alongside
+ * whatever else is in play (not as an allowlist of expired alone). When
+ * `expiredOnly` is set, it wins outright: expired and nothing else.
+ */
+function effectiveStatuses(statuses, includeExpired, expiredOnly) {
+  if (truthy(expiredOnly)) {
+    return ['expired'];
+  }
+  const stz = toList(statuses).filter(s => STATUSES.includes(s));
+  const base = stz.length ? stz : DEFAULT_VISIBLE_STATUSES;
+  if (truthy(includeExpired) && !base.includes('expired')) {
+    return [...base, 'expired'];
+  }
+  return base;
+}
+
 /** Local "YYYY-MM-DD" — compared string-wise against the flyer date columns. */
-function todayIso() {
+export function todayIso() {
   const d = new Date();
   const p = n => String(n).padStart(2, '0');
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
@@ -390,14 +998,6 @@ const STATUS_CASE = `CASE
   WHEN f.valid_from IS NOT NULL AND f.valid_from <> '' AND f.valid_from > ? THEN 'upcoming'
   WHEN f.valid_to   IS NOT NULL AND f.valid_to   <> '' AND ? > f.valid_to   THEN 'expired'
   ELSE 'valid'
-END`;
-
-// Sort key for the default (unfiltered) list: active/undated first, then
-// upcoming, then expired at the bottom. Same two `?` binds as STATUS_CASE.
-const STATUS_RANK = `CASE ${STATUS_CASE}
-  WHEN 'upcoming' THEN 1
-  WHEN 'expired'  THEN 2
-  ELSE 0
 END`;
 
 const toList = v =>
@@ -534,7 +1134,10 @@ function buildWhere({q, departments, stores, statuses, onSale}, today) {
 const PRODUCT_COLS = `p.id, p.flyer_id, p.page, p.name, p.price, p.price_value, p.info,
        p.box, p.confidence, p.category, p.tags, p.department,
        p.was_price, p.promo_text, p.on_sale, p.has_thumb,
-       f.store, f.valid_from, f.valid_to`;
+       f.store, f.valid_from, f.valid_to,
+       p.canonical_product_id, cp.canonical_name`;
+// Every PRODUCT_COLS query's FROM must include this alongside `JOIN flyers f`.
+const CANONICAL_JOIN = 'LEFT JOIN canonical_products cp ON cp.id = p.canonical_product_id';
 
 /** One DB row -> the API product shape. */
 function mapProductRow(r, baseUrl) {
@@ -558,6 +1161,8 @@ function mapProductRow(r, baseUrl) {
     validFrom: r.valid_from || '',
     validTo: r.valid_to || '',
     thumb: r.has_thumb ? `${baseUrl}/thumbs/${r.flyer_id}/${r.id}.jpg` : null,
+    canonicalProductId: r.canonical_product_id || null,
+    canonicalName: r.canonical_name || '',
   };
 }
 
@@ -586,32 +1191,78 @@ function collectPages(products, baseUrl) {
 }
 
 /**
- * Paginated search over all stored products, newest first.
+ * Paginated, canonical-product-grouped search over all stored products.
  * `q` matches name/info/category/tags; `departments` / `stores` / `statuses`
  * are optional arrays (or comma strings) that further narrow the set.
- * `baseUrl` is `http://<host>` — used to build page + thumbnail URLs.
- * Returns { products, pages, total, hasMore }.
+ * Expired flyers are hidden unless `statuses` explicitly asks for them,
+ * `includeExpired` is set (folds expired in alongside everything else), or
+ * `expiredOnly` is set (expired and nothing else, overriding `statuses`).
+ *
+ * Results are grouped by canonical product — the same real-world item
+ * across flyers/stores — so a shopper can compare "carrots" or "2% milk"
+ * across every store carrying it in one glance, instead of a flat list that
+ * happens to cluster by upload order (one flyer, one store, at a time). A
+ * product with no canonical match yet (the background matching pass hasn't
+ * reached it) is its own single-item group rather than disappearing.
+ * Groups are ordered by how many distinct stores carry them — most
+ * comparable first — except for a text search, which ranks by how well the
+ * group matches the query (store count only breaks a tie).
+ *
+ * `limit`/`offset` paginate GROUPS, not individual products, since a
+ * group's size varies. `baseUrl` is `http://<host>` — used to build page +
+ * thumbnail URLs. Returns { groups, pages, totalGroups, totalProducts,
+ * hasMore }, where each group is { groupKey, label, storeCount, products }
+ * and `products` is sorted cheapest-first.
  */
 export function searchProducts(
-  {q = '', departments, stores, statuses, onSale, limit = 20, offset = 0},
+  {
+    q = '',
+    departments,
+    stores,
+    statuses,
+    includeExpired,
+    expiredOnly,
+    onSale,
+    limit = 20,
+    offset = 0,
+  },
   baseUrl,
 ) {
-  const lim = Math.max(1, Math.min(100, Number(limit) || 20));
+  const lim = Math.max(1, Math.min(50, Number(limit) || 20));
   const off = Math.max(0, Number(offset) || 0);
   const today = todayIso();
 
   const {clause, params, query} = buildWhere(
-    {q, departments, stores, statuses, onSale},
+    {
+      q,
+      departments,
+      stores,
+      statuses: effectiveStatuses(statuses, includeExpired, expiredOnly),
+      onSale,
+    },
     today,
   );
 
-  const total = db
-    .prepare(
-      `SELECT COUNT(*) AS n
-         FROM products p JOIN flyers f ON f.id = p.flyer_id
-         ${clause}`,
-    )
-    .get(...params).n;
+  const FROM = 'FROM products p JOIN flyers f ON f.id = p.flyer_id';
+  // A product not yet linked to a canonical row is grouped under its own id,
+  // so it still shows up (as a singleton group) instead of vanishing.
+  const GROUP_KEY = 'COALESCE(p.canonical_product_id, p.id)';
+
+  const totalProducts = db.prepare(`SELECT COUNT(*) AS n ${FROM} ${clause}`).get(...params).n;
+
+  const totalGroups = totalProducts
+    ? db
+        .prepare(
+          `SELECT COUNT(*) AS n FROM (
+             SELECT ${GROUP_KEY} AS gk ${FROM} ${clause} GROUP BY gk
+           )`,
+        )
+        .get(...params).n
+    : 0;
+
+  if (!totalGroups) {
+    return {groups: [], pages: [], totalGroups: 0, totalProducts: 0, hasMore: false};
+  }
 
   // Relevance: +3 when the category IS the term, +3 when the term is the
   // category head, +2 for an exact tag, +1 for a whole-word name hit — so a
@@ -630,38 +1281,65 @@ export function searchProducts(
     .join(' + ');
   const scoreBinds = terms.flatMap(t => [t, t, t, t]);
 
-  // Plain browse and a bare aisle browse rank by flyer status (expired sinks);
-  // a scored query ranks by relevance; anything else stays newest-first.
-  const plain = clause === '';
-  let orderBy;
-  let orderParams;
-  if (scored) {
-    orderBy = 'ORDER BY score DESC, p.created_at DESC, p.rowid DESC';
-    orderParams = [];
-  } else if (plain || query.mode === 'department') {
-    orderBy = `ORDER BY ${STATUS_RANK}, p.created_at DESC, p.rowid DESC`;
-    orderParams = [today, today];
-  } else {
-    orderBy = 'ORDER BY p.created_at DESC, p.rowid DESC';
-    orderParams = [];
-  }
+  const groupOrderBy = scored
+    ? `ORDER BY MAX(${scoreExpr}) DESC, store_count DESC, n DESC, gk ASC`
+    : 'ORDER BY store_count DESC, n DESC, gk ASC';
 
-  const rows = db
+  const groupRows = db
     .prepare(
-      `SELECT ${PRODUCT_COLS}${scored ? `, (${scoreExpr}) AS score` : ''}
-         FROM products p
-         JOIN flyers f ON f.id = p.flyer_id
+      `SELECT ${GROUP_KEY} AS gk,
+              COUNT(DISTINCT f.store) AS store_count,
+              COUNT(*) AS n
+         ${FROM}
          ${clause}
-        ${orderBy}
+        GROUP BY gk
+        ${groupOrderBy}
         LIMIT ? OFFSET ?`,
     )
-    // bind order = statement text: SELECT score, WHERE, ORDER (status), LIMIT/OFFSET
-    .all(...scoreBinds, ...params, ...orderParams, lim, off);
+    // bind order = statement text: WHERE, ORDER (score), LIMIT/OFFSET
+    .all(...params, ...(scored ? scoreBinds : []), lim, off);
 
-  const products = rows.map(r => mapProductRow(r, baseUrl));
-  const pages = collectPages(products, baseUrl);
+  const groupKeys = groupRows.map(r => r.gk);
 
-  return {products, pages, total, hasMore: off + rows.length < total};
+  const productRows = db
+    .prepare(
+      `SELECT ${PRODUCT_COLS}, ${GROUP_KEY} AS gk
+         FROM products p
+         JOIN flyers f ON f.id = p.flyer_id
+         ${CANONICAL_JOIN}
+         ${andWhere(clause, `${GROUP_KEY} IN (${groupKeys.map(() => '?').join(',')})`)}
+        ORDER BY gk, (p.price_value IS NULL), p.price_value ASC, f.store ASC`,
+    )
+    // bind order = statement text: WHERE, group-key IN list
+    .all(...params, ...groupKeys);
+
+  const byGroup = new Map();
+  for (const row of productRows) {
+    const product = mapProductRow(row, baseUrl);
+    const list = byGroup.get(row.gk);
+    if (list) {
+      list.push(product);
+    } else {
+      byGroup.set(row.gk, [product]);
+    }
+  }
+
+  const groups = groupRows.map(r => {
+    const products = byGroup.get(r.gk) || [];
+    const label = titleCaseName(products[0]?.canonicalName || products[0]?.name || '');
+    return {groupKey: String(r.gk), label, storeCount: r.store_count, products};
+  });
+
+  return {
+    groups,
+    pages: collectPages(
+      groups.flatMap(g => g.products),
+      baseUrl,
+    ),
+    totalGroups,
+    totalProducts,
+    hasMore: off + groupRows.length < totalGroups,
+  };
 }
 
 /** Broad words that would blow a query wide open — dropped before searching. */
@@ -695,6 +1373,10 @@ const STOP_TERMS = new Set([
   'household',
   'cleaning',
   'aisle',
+  'fruit',
+  'fruits',
+  'vegetable',
+  'vegetables',
 ]);
 
 /**
@@ -719,7 +1401,14 @@ const STOP_TERMS = new Set([
 export function searchProductsExpanded(
   termsIn,
   baseUrl,
-  {limit = 24, must: mustIn = [], broad = false} = {},
+  {
+    limit = 24,
+    must: mustIn = [],
+    broad = false,
+    includeExpired = false,
+    stores: storesIn = [],
+    department = '',
+  } = {},
 ) {
   const norm = list =>
     [
@@ -731,10 +1420,15 @@ export function searchProductsExpanded(
     ].slice(0, 10);
 
   const terms = norm(termsIn);
-  if (!terms.length) {
+  const dept = isDepartment(department) ? department.toLowerCase() : '';
+  if (!terms.length && !dept) {
     return {products: [], pages: [], terms: [], must: [], total: 0};
   }
   const must = norm(mustIn);
+  const stores = [
+    ...new Set((Array.isArray(storesIn) ? storesIn : []).map(s => String(s).trim()).filter(Boolean)),
+  ].slice(0, 5);
+  const today = todayIso();
 
   const lim = Math.max(1, Math.min(50, Number(limit) || 24));
   // Full searchable text for one product; `"` and `,` in the tags JSON act as
@@ -745,45 +1439,79 @@ export function searchProductsExpanded(
   const catExpr = "lower(coalesce(p.category,''))";
   const tagsExpr = "coalesce(p.tags,'')";
 
-  // Ranking: +1 for a whole-word hit anywhere, +3 when the product's category IS
-  // the term (so "Lactantia Purfiltre Milk" [milk] outranks "Coconut Milk").
-  const scoreExpr = terms
-    .map(
-      () =>
-        `(CASE WHEN wordmatch(${blob}, ?) THEN 1 ELSE 0 END) + ` +
-        `(CASE WHEN ${catExpr} = ? THEN 3 ELSE 0 END)`,
-    )
-    .join(' + ');
-  const scoreBinds = terms.flatMap(t => [t, t]);
+  let orClause;
+  let inclBinds;
+  let scoreExpr;
+  let scoreBinds;
 
-  // Inclusion: broad = whole word anywhere. item = the term is the product's
-  // category head ("salmon" for category "salmon") OR a complete tag entry
-  // ("salmon" tag on a "trout or salmon portions" combo tile) — so every real
-  // salmon option shows, but a "frozen fish" tile that never names salmon does
-  // not. Parent-category words ("fish", "seafood") are stripped by STOP_TERMS
-  // before this, which is what keeps unrelated combo tiles out.
-  const itemGroup = `(headmatch(${catExpr}, ?) OR tagexact(${tagsExpr}, ?))`;
-  const orClause = terms
-    .map(() => (broad ? `wordmatch(${blob}, ?)` : itemGroup))
-    .join(' OR ');
-  const inclBinds = broad ? terms : terms.flatMap(t => [t, t]);
+  if (dept) {
+    // Whole-department browse ("fruits at Walmart") — the same precise
+    // classification the Search tab's department filter uses, rather than
+    // guessing free-text synonyms for an entire aisle (which either misses
+    // most of it or, via a broad wordmatch on a category word, pulls in
+    // unrelated products that merely mention it). Any `terms` given only
+    // affect ranking, so a specifically-named item floats to the top.
+    orClause = `lower(coalesce(p.department,'')) = ?`;
+    inclBinds = [dept];
+    scoreExpr = terms.length
+      ? terms.map(() => `(CASE WHEN wordmatch(${blob}, ?) THEN 1 ELSE 0 END)`).join(' + ')
+      : '0';
+    scoreBinds = terms;
+  } else {
+    // Ranking: +1 for a whole-word hit anywhere, +3 when the product's category IS
+    // the term (so "Lactantia Purfiltre Milk" [milk] outranks "Coconut Milk").
+    scoreExpr = terms
+      .map(
+        () =>
+          `(CASE WHEN wordmatch(${blob}, ?) THEN 1 ELSE 0 END) + ` +
+          `(CASE WHEN ${catExpr} = ? THEN 3 ELSE 0 END)`,
+      )
+      .join(' + ');
+    scoreBinds = terms.flatMap(t => [t, t]);
+
+    // Inclusion: broad = whole word anywhere. item = the term is the product's
+    // category head ("salmon" for category "salmon") OR a complete tag entry
+    // ("salmon" tag on a "trout or salmon portions" combo tile) — so every real
+    // salmon option shows, but a "frozen fish" tile that never names salmon does
+    // not. Parent-category words ("fish", "seafood") are stripped by STOP_TERMS
+    // before this, which is what keeps unrelated combo tiles out.
+    const itemGroup = `(headmatch(${catExpr}, ?) OR tagexact(${tagsExpr}, ?))`;
+    orClause = terms.map(() => (broad ? `wordmatch(${blob}, ?)` : itemGroup)).join(' OR ');
+    inclBinds = broad ? terms : terms.flatMap(t => [t, t]);
+  }
 
   const mustClause = must.length
     ? ` AND (${must.map(() => `wordmatch(${blob}, ?)`).join(' OR ')})`
     : '';
-  const where = `WHERE (${orClause})${mustClause}`;
+
+  // Chat search shows only active/upcoming flyers by default, same as the
+  // Search tab — expired ones are historical data, only pulled in when the
+  // agent explicitly asks for them (see `includeExpired`).
+  const effStatuses = effectiveStatuses(undefined, includeExpired, false);
+  const statusClause =
+    effStatuses.length < STATUSES.length
+      ? ` AND (${STATUS_CASE}) IN (${effStatuses.map(() => '?').join(',')})`
+      : '';
+  const statusBinds = statusClause ? [today, today, ...effStatuses] : [];
+
+  const storeClause = stores.length
+    ? ` AND f.store IN (${stores.map(() => '?').join(',')})`
+    : '';
+
+  const where = `WHERE (${orClause})${mustClause}${statusClause}${storeClause}`;
 
   const rows = db
     .prepare(
       `SELECT ${PRODUCT_COLS}, (${scoreExpr}) AS match_score
          FROM products p
          JOIN flyers f ON f.id = p.flyer_id
+         ${CANONICAL_JOIN}
         ${where}
         ORDER BY match_score DESC, p.created_at DESC, p.rowid DESC
         LIMIT ?`,
     )
-    // bind order = statement text: SELECT score, WHERE (incl, must), LIMIT
-    .all(...scoreBinds, ...inclBinds, ...must, lim);
+    // bind order = statement text: SELECT score, WHERE (incl, must, status, store), LIMIT
+    .all(...scoreBinds, ...inclBinds, ...must, ...statusBinds, ...stores, lim);
 
   const total = db
     .prepare(
@@ -791,7 +1519,7 @@ export function searchProductsExpanded(
          FROM products p JOIN flyers f ON f.id = p.flyer_id
         ${where}`,
     )
-    .get(...inclBinds, ...must).n;
+    .get(...inclBinds, ...must, ...statusBinds, ...stores).n;
 
   const products = rows.map(r => mapProductRow(r, baseUrl));
   return {products, pages: collectPages(products, baseUrl), terms, must, total};
@@ -818,13 +1546,16 @@ export function filterFacets({
   departments,
   stores,
   statuses,
+  includeExpired,
+  expiredOnly,
   onSale,
 } = {}) {
   const today = todayIso();
   const FROM = 'FROM products p JOIN flyers f ON f.id = p.flyer_id';
+  const effStatuses = effectiveStatuses(statuses, includeExpired, expiredOnly);
 
   // departments list — every filter except departments
-  const dw = buildWhere({q, stores, statuses, onSale}, today);
+  const dw = buildWhere({q, stores, statuses: effStatuses, onSale}, today);
   const deptRows = db
     .prepare(
       `SELECT p.department AS value, COUNT(*) AS n ${FROM}
@@ -834,7 +1565,7 @@ export function filterFacets({
     .all(...dw.params);
 
   // stores list — every filter except stores
-  const sw = buildWhere({q, departments, statuses, onSale}, today);
+  const sw = buildWhere({q, departments, statuses: effStatuses, onSale}, today);
   const storeRows = db
     .prepare(
       `SELECT f.store AS value, COUNT(*) AS n ${FROM}
@@ -856,7 +1587,7 @@ export function filterFacets({
   );
 
   // on-sale count — every filter except onSale itself
-  const ow = buildWhere({q, departments, stores, statuses}, today);
+  const ow = buildWhere({q, departments, stores, statuses: effStatuses}, today);
   const saleCount = db
     .prepare(
       `SELECT COUNT(*) AS n ${FROM} ${andWhere(ow.clause, 'p.on_sale = 1')}`,
@@ -864,19 +1595,42 @@ export function filterFacets({
     .get(...ow.params).n;
 
   // total — the whole selection
-  const all = buildWhere({q, departments, stores, statuses, onSale}, today);
+  const all = buildWhere(
+    {q, departments, stores, statuses: effStatuses, onSale},
+    today,
+  );
   const total = db
     .prepare(`SELECT COUNT(*) AS n ${FROM} ${all.clause}`)
     .get(...all.params).n;
 
+  // How many non-expired products match the current status pick (or the
+  // default set, if untouched) — always excluding expired regardless of the
+  // includeExpired/expiredOnly toggles, so it's a stable baseline to add
+  // `expiredCount` onto below.
+  const nonExpiredCount = effectiveStatuses(statuses, false, false).reduce(
+    (sum, s) => sum + (byStatus.get(s) || 0),
+    0,
+  );
+  const expiredCount = byStatus.get('expired') || 0;
+
   return {
     departments: deptRows.map(r => ({value: r.value, count: r.n})),
     stores: storeRows.map(r => ({value: r.value, count: r.n})),
-    // every state that has a match, alphabetically
+    // every non-expired state that has a match, alphabetically — expired is
+    // offered separately via `expiredCount` and the "include expired" toggle,
+    // not as one more option in this allowlist.
     statuses: [...STATUSES]
+      .filter(s => s !== 'expired')
       .sort()
       .filter(s => byStatus.get(s))
       .map(s => ({value: s, count: byStatus.get(s)})),
+    // how many expired products match everything else selected — what
+    // "show expired only" would return.
+    expiredCount,
+    // how many products "show expired with others" would return — the
+    // non-expired baseline plus expired, never equal to `expiredCount`
+    // unless there are zero non-expired matches.
+    expiredIncludedCount: nonExpiredCount + expiredCount,
     saleCount,
     total,
   };

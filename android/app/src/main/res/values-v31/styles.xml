@@ -1,0 +1,18 @@
+<resources>
+
+    <!-- Android 12+ (API 31+) renders a *system* splash screen (visible as its own
+         "Splash Screen" window in logcat) instead of just painting our activity's
+         windowBackground. It puts the icon inside a fixed circular well and — for
+         a plain bitmap, even with android:windowSplashScreenIconBackgroundColor or
+         an <adaptive-icon> wrapper set — insists on filling that well with white
+         first (confirmed empirically: neither attribute changed it here). Using a
+         flat, fully-opaque square (the green background already baked into the
+         bitmap, no transparency) sidesteps the white disc entirely — there is no
+         gap left for it to show through. -->
+    <style name="Theme.App.SplashScreen" parent="AppTheme">
+        <item name="android:windowSplashScreenBackground">@color/splash_background</item>
+        <item name="android:windowSplashScreenAnimatedIcon">@drawable/launch_logo_square</item>
+        <item name="android:windowBackground">@drawable/launch_screen</item>
+    </style>
+
+</resources>

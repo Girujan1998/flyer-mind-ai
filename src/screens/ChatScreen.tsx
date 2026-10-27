@@ -7,6 +7,7 @@ import {
   Image,
   Keyboard,
   KeyboardAvoidingView,
+  Modal,
   Platform,
   Pressable,
   StyleSheet,
@@ -17,6 +18,7 @@ import {
 
 import {
   AbortedError,
+  ChatProductGroup,
   ChatTurn,
   FlyerPage,
   NoServerError,
@@ -26,6 +28,7 @@ import {
   sendChat,
 } from '../api/extract';
 import ProductCard from '../components/ProductCard';
+import ProductCarousel from '../components/ProductCarousel';
 import ProductInfoModal from '../components/ProductInfoModal';
 import ScreenHeader from '../components/ScreenHeader';
 import SourcePageModal from '../components/SourcePageModal';
@@ -41,14 +44,13 @@ const FEATURED = 4;
 const CARD_GAP = spacing.sm;
 const CARD_WIDTH =
   (Dimensions.get('window').width - spacing.md * 2 - CARD_GAP) / 2;
+const SORT_MENU_WIDTH = 200;
 
 type ChatMessage = {
   id: string;
   role: 'user' | 'assistant';
   text: string;
-  products?: Product[];
-  terms?: string[];
-  must?: string[];
+  groups?: ChatProductGroup[];
   pending?: boolean;
   error?: boolean;
 };
@@ -62,6 +64,43 @@ const GREETING: ChatMessage = {
 let seq = 0;
 const uid = () => `m${Date.now().toString(36)}${(seq++).toString(36)}`;
 
+const titleCase = (s: string) => s.replace(/\b\w/g, c => c.toUpperCase());
+
+type SortMode = 'relevance' | 'price' | 'store' | 'sale';
+const SORT_OPTIONS: {mode: SortMode; label: string}[] = [
+  {mode: 'relevance', label: 'Relevance'},
+  {mode: 'price', label: 'Price'},
+  {mode: 'store', label: 'Store'},
+  {mode: 'sale', label: 'On Sale'},
+];
+
+/** Relevance keeps the server's own order; the rest sort client-side and
+ * only ever affect the one reply's own result set. */
+function sortProducts(products: Product[], mode: SortMode): Product[] {
+  if (mode === 'relevance') {
+    return products;
+  }
+  const copy = [...products];
+  if (mode === 'price') {
+    copy.sort((a, b) => {
+      if (a.priceValue == null) {
+        return b.priceValue == null ? 0 : 1;
+      }
+      if (b.priceValue == null) {
+        return -1;
+      }
+      return a.priceValue - b.priceValue;
+    });
+  } else if (mode === 'store') {
+    copy.sort((a, b) => (a.store || '').localeCompare(b.store || ''));
+  } else {
+    // Stable sort — on-sale items float up, everyone else keeps the
+    // server's relative (relevance) order within their own group.
+    copy.sort((a, b) => Number(b.onSale) - Number(a.onSale));
+  }
+  return copy;
+}
+
 /**
  * Last 6 turns. Product replies collapse to a marker so the model never re-reads
  * card JSON, but the marker keeps the searched terms + any restriction so a
@@ -74,12 +113,17 @@ function buildHistory(all: ChatMessage[]): ChatTurn[] {
     .map(m => ({
       role: m.role,
       content:
-        m.role === 'assistant' && m.products?.length
-          ? `(showed ${m.products.length} products for: ${(m.terms ?? [])
-              .slice(0, 8)
-              .join(', ')}${
-              m.must?.length ? `; restricted to: ${m.must.join(', ')}` : ''
-            })`
+        m.role === 'assistant' && m.groups?.length
+          ? m.groups
+              .map(g => {
+                const must = g.must.length
+                  ? `; restricted to: ${g.must.join(', ')}`
+                  : '';
+                return `(showed ${g.products.length} products for: ${g.terms
+                  .slice(0, 8)
+                  .join(', ')}${must})`;
+              })
+              .join(' ')
           : m.text,
     }));
 }
@@ -161,12 +205,30 @@ function ChatScreen(): React.JSX.Element {
   const [infoProduct, setInfoProduct] = useState<Product | null>(null);
   const [flyerProduct, setFlyerProduct] = useState<Product | null>(null);
   const [keyboardUp, setKeyboardUp] = useState(false);
+  /** Measured height of ScreenHeader — KeyboardAvoidingView sits below it, and
+   * on iOS needs that height as keyboardVerticalOffset or its "padding"
+   * behavior under-compensates by roughly the header's height, leaving the
+   * composer covered by the keyboard (only visible with the real on-screen
+   * keyboard — a simulator driven by the host keyboard never shows it). */
+  const [headerHeight, setHeaderHeight] = useState(0);
   /** Message ids whose "+ N more" list has been expanded. */
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  /** Group keys currently showing the swipeable carousel instead of the grid. */
+  const [carouselGroups, setCarouselGroups] = useState<Set<string>>(new Set());
+  /** Per-group sort choice — absent means the default, "relevance". */
+  const [groupSort, setGroupSort] = useState<Map<string, SortMode>>(new Map());
+  /** Which group's sort menu is open, and where to anchor it (from the
+   * trigger button's on-screen position) — at most one open at a time. */
+  const [sortMenuFor, setSortMenuFor] = useState<{
+    groupKey: string;
+    top: number;
+    left: number;
+  } | null>(null);
 
   const abortRef = useRef<AbortController | null>(null);
   const reqId = useRef(0);
   const listRef = useRef<FlatList<ChatMessage>>(null);
+  const sortBtnRefs = useRef<Map<string, View>>(new Map());
 
   useEffect(() => {
     const show = Keyboard.addListener('keyboardWillShow', () =>
@@ -192,6 +254,32 @@ function ChatScreen(): React.JSX.Element {
 
   const scrollToEnd = useCallback(() => {
     requestAnimationFrame(() => listRef.current?.scrollToEnd({animated: true}));
+  }, []);
+
+  // Kept in sync so scrollMessageToTop always sees the latest list, even
+  // though it's called right after a setMessages() whose effect hasn't
+  // committed yet.
+  const messagesRef = useRef<ChatMessage[]>(messages);
+  useEffect(() => {
+    messagesRef.current = messages;
+  }, [messages]);
+
+  /** Scroll so this message's own bubble sits at the top of the viewport —
+   * used once a reply's cards land, and again whenever its sort changes,
+   * so results are never left showing mid-grid with the bubble scrolled
+   * out of view above. */
+  const scrollMessageToTop = useCallback((id: string) => {
+    requestAnimationFrame(() => {
+      const idx = messagesRef.current.findIndex(m => m.id === id);
+      if (idx === -1) {
+        return;
+      }
+      listRef.current?.scrollToIndex({
+        index: idx,
+        animated: true,
+        viewPosition: 0,
+      });
+    });
   }, []);
 
   const mergePages = (list: FlyerPage[]) =>
@@ -241,13 +329,12 @@ function ChatScreen(): React.JSX.Element {
                 ...m,
                 pending: false,
                 text: res.reply,
-                products: res.products,
-                terms: res.terms,
-                must: res.must,
+                groups: res.groups,
               }
             : m,
         ),
       );
+      scrollMessageToTop(placeholderId);
     } catch (err) {
       if (id !== reqId.current) {
         return;
@@ -267,6 +354,7 @@ function ChatScreen(): React.JSX.Element {
             : m,
         ),
       );
+      scrollMessageToTop(placeholderId);
     } finally {
       if (id === reqId.current) {
         setSending(false);
@@ -284,6 +372,9 @@ function ChatScreen(): React.JSX.Element {
     setInput('');
     setSending(false);
     setExpanded(new Set());
+    setCarouselGroups(new Set());
+    setGroupSort(new Map());
+    setSortMenuFor(null);
     setInfoProduct(null);
     setFlyerProduct(null);
     Keyboard.dismiss();
@@ -301,6 +392,47 @@ function ChatScreen(): React.JSX.Element {
         {text: 'New chat', style: 'destructive', onPress: resetChat},
       ],
     );
+  };
+
+  const toggleCarousel = (groupKey: string) =>
+    setCarouselGroups(prev => {
+      const next = new Set(prev);
+      if (next.has(groupKey)) {
+        next.delete(groupKey);
+      } else {
+        next.add(groupKey);
+      }
+      return next;
+    });
+
+  const setSortMode = (groupKey: string, mode: SortMode) => {
+    setGroupSort(prev => {
+      const next = new Map(prev);
+      if (mode === 'relevance') {
+        next.delete(groupKey);
+      } else {
+        next.set(groupKey, mode);
+      }
+      return next;
+    });
+    // groupKey is "<message id>:<group index>" — the message id has no
+    // colon of its own (see uid()), so splitting on the last one is safe.
+    scrollMessageToTop(groupKey.slice(0, groupKey.lastIndexOf(':')));
+  };
+
+  const openSortMenu = (groupKey: string) => {
+    const node = sortBtnRefs.current.get(groupKey);
+    node?.measureInWindow((x, y, width, height) => {
+      const screenWidth = Dimensions.get('window').width;
+      setSortMenuFor({
+        groupKey,
+        top: y + height + 6,
+        left: Math.max(
+          spacing.md,
+          Math.min(x, screenWidth - SORT_MENU_WIDTH - spacing.md),
+        ),
+      });
+    });
   };
 
   const openInFlyer = (product: Product) => {
@@ -321,12 +453,11 @@ function ChatScreen(): React.JSX.Element {
       );
     }
 
-    const products = item.products ?? [];
-    // 7+ matches: top FEATURED as cards, the tail behind a "+ N more" tap.
-    const split = products.length > FEATURED + 2;
-    const featured = split ? products.slice(0, FEATURED) : products;
-    const rest = split ? products.slice(FEATURED) : [];
-    const isOpen = expanded.has(item.id);
+    const groups = item.groups ?? [];
+    // Multiple distinct products ("tomatoes and chips") each get their own
+    // labeled section so results don't blur together; a single product
+    // keeps the plain, header-less layout this already had.
+    const showHeaders = groups.length > 1;
 
     return (
       <View style={styles.rowLeft}>
@@ -351,73 +482,177 @@ function ChatScreen(): React.JSX.Element {
           </View>
         )}
 
-        {featured.length ? (
-          <View style={styles.grid}>
-            {featured.map(p => (
-              <ProductCard
-                key={p.id}
-                product={p}
-                width={CARD_WIDTH}
-                onPress={setInfoProduct}
-              />
-            ))}
-          </View>
-        ) : null}
+        {groups.map((group, gi) => {
+          const groupKey = `${item.id}:${gi}`;
+          const sortMode = groupSort.get(groupKey) ?? 'relevance';
+          const sortLabel =
+            SORT_OPTIONS.find(o => o.mode === sortMode)?.label ?? 'Relevance';
+          const products = sortProducts(group.products, sortMode);
+          if (!products.length) {
+            return null;
+          }
+          // 7+ matches: top FEATURED as cards, the tail behind a "+ N more" tap.
+          const split = products.length > FEATURED + 2;
+          const featured = split ? products.slice(0, FEATURED) : products;
+          const rest = split ? products.slice(FEATURED) : [];
+          const isOpen = expanded.has(groupKey);
+          const showCarousel = carouselGroups.has(groupKey);
 
-        {rest.length ? (
-          isOpen ? (
-            <View style={styles.rows}>
-              {rest.map((p, i) => (
-                <ProductRow
-                  key={p.id}
-                  product={p}
-                  first={i === 0}
-                  onPress={setInfoProduct}
-                />
-              ))}
+          return (
+            <View key={groupKey} style={styles.group}>
+              {showHeaders ? (
+                <Text style={styles.groupHeader}>
+                  {titleCase(group.label)} ({group.total})
+                </Text>
+              ) : null}
+
+              {products.length > 1 ? (
+                <View style={styles.controlsRow}>
+                  <Pressable
+                    ref={el => {
+                      if (el) {
+                        sortBtnRefs.current.set(groupKey, el);
+                      }
+                    }}
+                    onPress={() => openSortMenu(groupKey)}
+                    accessibilityRole="button"
+                    accessibilityLabel={`Sort by ${sortLabel}. Opens a menu with more options.`}
+                    style={({pressed}) => [
+                      styles.viewToggle,
+                      sortMenuFor?.groupKey === groupKey && styles.sortBtnOpen,
+                      pressed && styles.pressed,
+                    ]}>
+                    <View style={styles.sortIcon}>
+                      <View style={[styles.sortIconBar, styles.sortIconBar1]} />
+                      <View style={[styles.sortIconBar, styles.sortIconBar2]} />
+                      <View style={[styles.sortIconBar, styles.sortIconBar3]} />
+                    </View>
+                    <Text style={styles.viewToggleText}>Sort: {sortLabel}</Text>
+                    <View
+                      style={[
+                        styles.caret,
+                        sortMenuFor?.groupKey === groupKey && styles.caretOpen,
+                      ]}
+                    />
+                  </Pressable>
+
+                  <Pressable
+                    onPress={() => toggleCarousel(groupKey)}
+                    accessibilityRole="button"
+                    accessibilityLabel={
+                      showCarousel ? 'View as grid' : 'View as carousel'
+                    }
+                    style={({pressed}) => [
+                      styles.viewToggle,
+                      pressed && styles.pressed,
+                    ]}>
+                    {showCarousel ? (
+                      <View style={styles.gridIcon}>
+                        <View style={styles.gridIconSq} />
+                        <View style={styles.gridIconSq} />
+                        <View style={styles.gridIconSq} />
+                        <View style={styles.gridIconSq} />
+                      </View>
+                    ) : (
+                      <View style={styles.stackIcon}>
+                        <View
+                          style={[styles.stackIconLayer, styles.stackIconBack]}
+                        />
+                        <View
+                          style={[styles.stackIconLayer, styles.stackIconMid]}
+                        />
+                        <View
+                          style={[styles.stackIconLayer, styles.stackIconFront]}
+                        />
+                      </View>
+                    )}
+                    <Text style={styles.viewToggleText}>
+                      {showCarousel ? 'View as grid' : 'View as carousel'}
+                    </Text>
+                  </Pressable>
+                </View>
+              ) : null}
+
+              {showCarousel ? (
+                <ProductCarousel products={products} onPress={setInfoProduct} />
+              ) : (
+                <>
+                  <View style={styles.grid}>
+                    {featured.map(p => (
+                      <ProductCard
+                        key={p.id}
+                        product={p}
+                        width={CARD_WIDTH}
+                        onPress={setInfoProduct}
+                      />
+                    ))}
+                  </View>
+
+                  {rest.length ? (
+                    isOpen ? (
+                      <View style={styles.rows}>
+                        {rest.map((p, i) => (
+                          <ProductRow
+                            key={p.id}
+                            product={p}
+                            first={i === 0}
+                            onPress={setInfoProduct}
+                          />
+                        ))}
+                      </View>
+                    ) : (
+                      <Pressable
+                        onPress={() =>
+                          setExpanded(prev => new Set(prev).add(groupKey))
+                        }
+                        accessibilityRole="button"
+                        style={({pressed}) => [
+                          styles.moreBtn,
+                          pressed && styles.pressed,
+                        ]}>
+                        <Text style={styles.moreBtnText}>
+                          + {rest.length} more{' '}
+                          {rest.length === 1 ? 'match' : 'matches'}
+                        </Text>
+                      </Pressable>
+                    )
+                  ) : null}
+                </>
+              )}
             </View>
-          ) : (
-            <Pressable
-              onPress={() => setExpanded(prev => new Set(prev).add(item.id))}
-              accessibilityRole="button"
-              style={({pressed}) => [
-                styles.moreBtn,
-                pressed && styles.pressed,
-              ]}>
-              <Text style={styles.moreBtnText}>
-                + {rest.length} more {rest.length === 1 ? 'match' : 'matches'}
-              </Text>
-            </Pressable>
-          )
-        ) : null}
+          );
+        })}
       </View>
     );
   };
 
   return (
     <View style={styles.container}>
-      <ScreenHeader
-        title="Chat"
-        action={
-          messages.length > 1 ? (
-            <Pressable
-              onPress={newChat}
-              accessibilityRole="button"
-              accessibilityLabel="Start a new chat"
-              hitSlop={8}
-              style={({pressed}) => [
-                styles.newChatBtn,
-                pressed && styles.pressed,
-              ]}>
-              <Text style={styles.newChatText}>New chat</Text>
-            </Pressable>
-          ) : undefined
-        }
-      />
+      <View onLayout={e => setHeaderHeight(e.nativeEvent.layout.height)}>
+        <ScreenHeader
+          title="Chat"
+          action={
+            messages.length > 1 ? (
+              <Pressable
+                onPress={newChat}
+                accessibilityRole="button"
+                accessibilityLabel="Start a new chat"
+                hitSlop={8}
+                style={({pressed}) => [
+                  styles.newChatBtn,
+                  pressed && styles.pressed,
+                ]}>
+                <Text style={styles.newChatText}>New chat</Text>
+              </Pressable>
+            ) : undefined
+          }
+        />
+      </View>
 
       <KeyboardAvoidingView
         style={styles.flex}
-        behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
+        behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+        keyboardVerticalOffset={Platform.OS === 'ios' ? headerHeight : 0}>
         <FlatList
           ref={listRef}
           data={messages}
@@ -426,7 +661,26 @@ function ChatScreen(): React.JSX.Element {
           contentContainerStyle={styles.list}
           keyboardShouldPersistTaps="handled"
           keyboardDismissMode="interactive"
-          onContentSizeChange={scrollToEnd}
+          // Follow the tail while a reply is still pending (so the "…"
+          // indicator stays in view); once it lands, scrollMessageToTop
+          // takes over so the reply's own bubble — not the end of a long
+          // card grid — is what the user sees.
+          onContentSizeChange={() => {
+            if (sending) {
+              scrollToEnd();
+            }
+          }}
+          onScrollToIndexFailed={info => {
+            setTimeout(
+              () =>
+                listRef.current?.scrollToIndex({
+                  index: info.index,
+                  animated: true,
+                  viewPosition: 0,
+                }),
+              50,
+            );
+          }}
         />
 
         <View
@@ -496,6 +750,57 @@ function ChatScreen(): React.JSX.Element {
         }
         onClose={() => setFlyerProduct(null)}
       />
+
+      <Modal
+        transparent
+        visible={!!sortMenuFor}
+        animationType="fade"
+        onRequestClose={() => setSortMenuFor(null)}>
+        <Pressable
+          style={styles.sortMenuBackdrop}
+          onPress={() => setSortMenuFor(null)}
+          accessibilityLabel="Close sort menu">
+          {sortMenuFor ? (
+            <Pressable
+              onPress={() => {}}
+              style={[
+                styles.sortMenu,
+                {top: sortMenuFor.top, left: sortMenuFor.left},
+              ]}>
+              {SORT_OPTIONS.map(opt => {
+                const active =
+                  (groupSort.get(sortMenuFor.groupKey) ?? 'relevance') ===
+                  opt.mode;
+                return (
+                  <Pressable
+                    key={opt.mode}
+                    onPress={() => {
+                      setSortMode(sortMenuFor.groupKey, opt.mode);
+                      setSortMenuFor(null);
+                    }}
+                    accessibilityRole="menuitem"
+                    accessibilityState={{selected: active}}
+                    style={({pressed}) => [
+                      styles.sortMenuItem,
+                      pressed && styles.sortMenuItemPressed,
+                    ]}>
+                    <Text
+                      style={[
+                        styles.sortMenuItemText,
+                        active && styles.sortMenuItemTextOn,
+                      ]}>
+                      {opt.label}
+                    </Text>
+                    <View style={[styles.sortDot, active && styles.sortDotOn]}>
+                      {active ? <View style={styles.sortDotInner} /> : null}
+                    </View>
+                  </Pressable>
+                );
+              })}
+            </Pressable>
+          ) : null}
+        </Pressable>
+      </Modal>
     </View>
   );
 }
@@ -559,12 +864,144 @@ const makeStyles = (c: Palette) =>
     },
     bubbleErrorText: {color: c.danger},
 
+    group: {alignSelf: 'stretch', gap: spacing.sm},
+    groupHeader: {
+      color: c.text,
+      fontFamily: fonts.semibold,
+      fontSize: 13,
+      fontWeight: '600',
+      textTransform: 'uppercase',
+      letterSpacing: 0.4,
+    },
+
     grid: {
       flexDirection: 'row',
       flexWrap: 'wrap',
       gap: CARD_GAP,
       alignItems: 'stretch',
     },
+
+    controlsRow: {
+      flexDirection: 'row',
+      flexWrap: 'wrap',
+      alignItems: 'center',
+      gap: spacing.xs,
+    },
+    sortBtnOpen: {
+      backgroundColor: c.primaryTint,
+      borderColor: c.primary,
+    },
+    sortIcon: {width: 14, height: 14, justifyContent: 'center', gap: 2.5},
+    sortIconBar: {height: 2, borderRadius: 1, backgroundColor: c.primary},
+    sortIconBar1: {width: 12},
+    sortIconBar2: {width: 8},
+    sortIconBar3: {width: 4},
+    caret: {
+      width: 0,
+      height: 0,
+      marginLeft: 1,
+      borderLeftWidth: 4,
+      borderRightWidth: 4,
+      borderTopWidth: 5,
+      borderLeftColor: 'transparent',
+      borderRightColor: 'transparent',
+      borderTopColor: c.primary,
+    },
+    caretOpen: {transform: [{rotate: '180deg'}]},
+
+    sortMenuBackdrop: {flex: 1},
+    sortMenu: {
+      position: 'absolute',
+      width: SORT_MENU_WIDTH,
+      backgroundColor: c.surface,
+      borderRadius: radius.md,
+      borderWidth: 1,
+      borderColor: c.border,
+      padding: 6,
+      gap: 1,
+      shadowColor: '#000',
+      shadowOffset: {width: 0, height: 8},
+      shadowOpacity: 0.18,
+      shadowRadius: 20,
+      elevation: 8,
+    },
+    sortMenuItem: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+      gap: 10,
+      paddingVertical: spacing.sm,
+      paddingHorizontal: spacing.sm + 2,
+      borderRadius: radius.sm,
+    },
+    sortMenuItemPressed: {backgroundColor: c.surfaceAlt},
+    sortMenuItemText: {
+      color: c.text,
+      fontFamily: fonts.semibold,
+      fontSize: 13.5,
+      fontWeight: '600',
+    },
+    sortMenuItemTextOn: {color: c.primary},
+    sortDot: {
+      width: 16,
+      height: 16,
+      borderRadius: 8,
+      borderWidth: 1.5,
+      borderColor: c.border,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    sortDotOn: {borderColor: c.primary},
+    sortDotInner: {
+      width: 8,
+      height: 8,
+      borderRadius: 4,
+      backgroundColor: c.primary,
+    },
+
+    viewToggle: {
+      alignSelf: 'flex-start',
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 7,
+      paddingVertical: spacing.xs + 2,
+      paddingHorizontal: spacing.sm + 3,
+      borderRadius: radius.md,
+      borderWidth: 1,
+      borderColor: c.border,
+      backgroundColor: c.surface,
+    },
+    viewToggleText: {
+      color: c.primary,
+      fontFamily: fonts.semibold,
+      fontSize: 12,
+      fontWeight: '600',
+    },
+    gridIcon: {
+      width: 14,
+      height: 14,
+      flexDirection: 'row',
+      flexWrap: 'wrap',
+      gap: 2,
+    },
+    gridIconSq: {
+      width: 6,
+      height: 6,
+      borderRadius: 1.5,
+      backgroundColor: c.primary,
+    },
+    stackIcon: {width: 15, height: 15},
+    stackIconLayer: {
+      position: 'absolute',
+      width: 11,
+      height: 9,
+      borderRadius: 2.5,
+      borderWidth: 1.4,
+      borderColor: c.primary,
+    },
+    stackIconBack: {left: 0, top: 5, backgroundColor: c.surface},
+    stackIconMid: {left: 2, top: 2.5, backgroundColor: c.surface},
+    stackIconFront: {left: 4, top: 0, backgroundColor: c.primaryTint},
 
     moreBtn: {
       alignSelf: 'stretch',

@@ -1,3 +1,5 @@
+import AsyncStorage from '@react-native-async-storage/async-storage';
+
 import {API_BASE_URL} from '../config';
 
 export type SelectedPdf = {
@@ -44,6 +46,10 @@ export type Product = {
   validFrom: string;
   /** Last day the flyer prices are in effect, "YYYY-MM-DD"; '' if unknown. */
   validTo: string;
+  /** The cross-flyer "same real-world product" group this sighting belongs to; null until the matching pass links it. */
+  canonicalProductId: string | null;
+  /** Display name of that group, e.g. "strawberries"; '' if not linked yet. */
+  canonicalName: string;
 };
 
 export type FlyerPage = {
@@ -67,6 +73,36 @@ export class AbortedError extends Error {
     super('Cancelled');
     this.name = 'AbortedError';
   }
+}
+
+const USER_ID_KEY = 'flyerMindAI.userId';
+let cachedUserId: string | null = null;
+
+// RFC-4122-*shaped* v4 id (Math.random, not crypto-grade) — good enough for
+// an anonymous per-install identity to hang price alerts off of; Hermes on
+// this RN version has no built-in crypto.randomUUID.
+function randomId(): string {
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
+    const r = Math.floor(Math.random() * 16);
+    const v = c === 'x' ? r : (r % 4) + 8;
+    return v.toString(16);
+  });
+}
+
+/** This install's anonymous id — generated once, persisted, reused after. */
+export async function getUserId(): Promise<string> {
+  if (cachedUserId) {
+    return cachedUserId;
+  }
+  const stored = await AsyncStorage.getItem(USER_ID_KEY).catch(() => null);
+  if (stored) {
+    cachedUserId = stored;
+    return stored;
+  }
+  const id = randomId();
+  await AsyncStorage.setItem(USER_ID_KEY, id).catch(() => {});
+  cachedUserId = id;
+  return id;
 }
 
 async function api<T>(path: string, init?: RequestInit): Promise<T> {
@@ -109,14 +145,54 @@ export type UploadResult = {
   reused: boolean;
 };
 
+export type UploadProgress = {
+  /** Pages the server has finished extracting so far (success or failure). */
+  done: number;
+  /** Total pages being extracted; 0 until the server has rendered the PDF. */
+  total: number;
+};
+
+type UploadJobStatus = {
+  jobId: string;
+  state: 'processing' | 'done' | 'error';
+  progress: UploadProgress;
+  result?: UploadResult;
+  error?: string;
+};
+
+/** Sleep that resolves early if the signal aborts. */
+export function delay(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise(resolve => {
+    if (signal?.aborted) {
+      resolve();
+      return;
+    }
+    const t = setTimeout(resolve, ms);
+    const onAbort = () => {
+      clearTimeout(t);
+      resolve();
+    };
+    signal?.addEventListener?.('abort', onAbort);
+  });
+}
+
+const POLL_INTERVAL_MS = 1000;
+
 /**
  * Upload a flyer PDF. The server rasterizes each page, runs Gemini vision, and
- * SAVES the products + bounding boxes to its database. Returns a summary only —
- * browse the products on the Search screen.
+ * SAVES the products + bounding boxes to its database — returning a summary
+ * only (browse the products on the Search screen).
+ *
+ * The upload itself returns almost immediately with a job id; this then
+ * polls the job's status roughly once a second until it finishes, calling
+ * `onProgress` with each update so the caller can render a real progress bar
+ * instead of an indefinite spinner for what can be a multi-page, multi-call
+ * Gemini extraction.
  */
-export function extractFlyer(
+export async function extractFlyer(
   file: SelectedPdf,
   signal?: AbortSignal,
+  onProgress?: (progress: UploadProgress) => void,
 ): Promise<UploadResult> {
   const form = new FormData();
   form.append('file', {
@@ -124,47 +200,226 @@ export function extractFlyer(
     name: file.name || 'flyer.pdf',
     type: file.mimeType || 'application/pdf',
   } as unknown as Blob);
-  return api<UploadResult>('/flyers/extract', {
+  let status = await api<UploadJobStatus>('/flyers/extract', {
     method: 'POST',
     body: form,
     signal,
   });
+
+  while (status.state === 'processing') {
+    onProgress?.(status.progress);
+    await delay(POLL_INTERVAL_MS, signal);
+    if (signal?.aborted) {
+      throw new AbortedError();
+    }
+    status = await api<UploadJobStatus>(
+      `/flyers/extract/${encodeURIComponent(status.jobId)}/status`,
+      {signal},
+    );
+  }
+
+  onProgress?.(status.progress);
+
+  if (status.state === 'error' || !status.result) {
+    throw new Error(status.error || 'Extraction failed');
+  }
+  return status.result;
 }
 
 export type ChatRole = 'user' | 'assistant';
 export type ChatTurn = {role: ChatRole; content: string};
-export type ChatResponse = {
-  reply: string;
+
+/** One product's results within a "search" chat reply — "tomatoes and chips"
+ * comes back as two of these, so the UI can section them instead of mixing
+ * both products into one list. */
+export type ChatProductGroup = {
+  /** Display label for the section header, e.g. "tomatoes". */
+  label: string;
   products: Product[];
-  pages: FlyerPage[];
-  /** The expansion terms the agent actually searched; [] for a plain reply. */
+  /** The expansion terms actually searched for this product. */
   terms: string[];
   /** Restriction words a follow-up added (e.g. child / gluten free); [] if none. */
   must: string[];
+  /** Total matches for this product — may exceed `products.length`. */
+  total: number;
+};
+
+export type ChatResponse = {
+  reply: string;
+  /** [] for anything that isn't a product search (price question, alert, etc). */
+  groups: ChatProductGroup[];
+  pages: FlyerPage[];
+  /** Present only for a price-question reply — the numbers behind it. */
+  priceInsight?: PriceInsight | null;
 };
 
 /**
  * Ask the Chat-tab agent. The server runs one Gemini call to turn the latest
- * user turn into either a product search (expanded with synonyms / brand names)
- * or a short reply. `messages` should be a trimmed recent history ending with
- * the new user turn.
+ * user turn into a product search, a price question, a new price alert, or a
+ * short reply. `messages` should be a trimmed recent history ending with the
+ * new user turn. Sends this install's anonymous id so "set_alert" turns have
+ * somewhere to save the alert.
  */
-export function sendChat(
+export async function sendChat(
   messages: ChatTurn[],
   signal?: AbortSignal,
 ): Promise<ChatResponse> {
+  const userId = await getUserId();
   return api<ChatResponse>('/chat', {
     method: 'POST',
-    headers: {'Content-Type': 'application/json'},
+    headers: {'Content-Type': 'application/json', 'X-User-Id': userId},
     body: JSON.stringify({messages}),
     signal,
   });
 }
 
-export type SearchResult = {
+/** One flyer's price sighting of a canonical product, oldest first. */
+export type PriceHistoryEntry = {
+  price: string;
+  priceValue: number | null;
+  onSale: boolean;
+  store: string;
+  validFrom: string;
+  validTo: string;
+  flyerId: string;
+  page: number;
+};
+
+export type DealQuality = 'great' | 'good' | 'average' | 'poor';
+
+export type PriceInsight = {
+  currentPrice: number | null;
+  min90d: number | null;
+  /** The flyer week the 90-day low happened, "YYYY-MM-DD"; null if unknown. */
+  min90dValidFrom: string | null;
+  min90dValidTo: string | null;
+  /** Which retailer had that low; null if unknown. */
+  min90dStore: string | null;
+  median90d: number | null;
+  isLowestIn3Months: boolean;
+  isLowestIn6Months: boolean;
+  isLowestIn12Months: boolean;
+  dealQuality: DealQuality | null;
+  /** Roughly how often (in days) it's gone on sale recently; null if not enough history. */
+  saleFrequencyDays: number | null;
+  byStore: {
+    store: string;
+    latestPrice: number | null;
+    lowestPrice: number | null;
+  }[];
+  sightings: number;
+  /** True when these sightings aren't all priced the same way (some per
+   * lb/kg, some flat, some a multi-buy) — see `priceBasis` — so the
+   * comparison above may not be exact even though every price is a plain
+   * number. */
+  mixedPriceUnits: boolean;
+};
+
+/**
+ * How a flyer price is actually priced — "$3.17/lb", "$5.99/3 lb", "$4.99
+ * each", and "2/$7" are NOT directly comparable dollar figures. Returns
+ * "<n>lb"/"<n>kg" for a per-weight price (n = the lb/kg count it's priced
+ * per, 1 if none is printed), "multi<n>" for a "n/$X" multi-buy, else "flat"
+ * (a plain per-item/package price). Mirrors server/src/db.js `priceBasis` —
+ * used here to flag mixed units on the price-history strip without an extra
+ * network round trip (the history list this reads from is already fetched).
+ */
+export function priceBasis(priceText: string): string {
+  const s = priceText.toLowerCase();
+  let m = s.match(/\/\s*(\d+(?:\.\d+)?)\s*(lbs?|pounds?|kgs?|kilograms?)\b/);
+  if (m) {
+    return `${m[1]}${m[2].startsWith('k') ? 'kg' : 'lb'}`;
+  }
+  m = s.match(/\b(lbs?|pounds?|kgs?|kilograms?)\b/);
+  if (m) {
+    return `1${m[1].startsWith('k') ? 'kg' : 'lb'}`;
+  }
+  m = s.match(/(\d+)\s*\/\s*\$|(\d+)\s*for\s*\$/);
+  if (m) {
+    return `multi${m[1] ?? m[2]}`;
+  }
+  return 'flat';
+}
+
+/** Chronological price history for a canonical product, e.g. for a trend chart. */
+export function fetchPriceHistory(
+  canonicalProductId: string,
+  opts: {store?: string; months?: number} = {},
+): Promise<{history: PriceHistoryEntry[]}> {
+  const qs = [
+    opts.store ? `store=${encodeURIComponent(opts.store)}` : '',
+    opts.months ? `months=${opts.months}` : '',
+  ]
+    .filter(Boolean)
+    .join('&');
+  return api(
+    `/price-history/${encodeURIComponent(canonicalProductId)}${
+      qs ? `?${qs}` : ''
+    }`,
+  );
+}
+
+/** Deal-quality / lowest-price / retailer-comparison / sale-frequency, one call. */
+export function fetchPriceInsight(
+  canonicalProductId: string,
+  opts: {store?: string} = {},
+): Promise<PriceInsight> {
+  const qs = opts.store ? `?store=${encodeURIComponent(opts.store)}` : '';
+  return api(`/price-insight/${encodeURIComponent(canonicalProductId)}${qs}`);
+}
+
+export type PriceAlert = {
+  id: string;
+  canonicalProductId: string;
+  canonicalName: string;
+  targetPrice: number;
+  comparison: 'lt' | 'lte';
+  store: string;
+  createdAt: string;
+  resolvedAt: string | null;
+  resolvedProductId: string | null;
+};
+
+/** This device's price alerts, open ones first. */
+export async function fetchAlerts(): Promise<{alerts: PriceAlert[]}> {
+  const userId = await getUserId();
+  return api('/alerts', {headers: {'X-User-Id': userId}});
+}
+
+/** Create a price alert on a canonical product for this device. */
+export async function createAlert(input: {
+  canonicalProductId: string;
+  targetPrice: number;
+  comparison?: 'lt' | 'lte';
+  store?: string;
+}): Promise<{id: string}> {
+  const userId = await getUserId();
+  return api('/alerts', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json', 'X-User-Id': userId},
+    body: JSON.stringify(input),
+  });
+}
+
+/** One canonical product's sightings across stores — cheapest first — so the
+ * Search tab can show "carrots" (say) as one comparable group instead of
+ * scattering its per-store listings through a flat, upload-order list. A
+ * product not yet linked to a canonical row is its own single-item group. */
+export type ProductGroup = {
+  groupKey: string;
+  label: string;
+  storeCount: number;
   products: Product[];
+};
+
+export type SearchResult = {
+  groups: ProductGroup[];
   pages: FlyerPage[];
-  total: number;
+  /** Total canonical-product groups matching the query/filters — what
+   * `limit`/`offset` paginate over. */
+  totalGroups: number;
+  /** Total individual product listings across all matching groups. */
+  totalProducts: number;
   hasMore: boolean;
 };
 
@@ -172,9 +427,16 @@ export type SearchResult = {
 export type ProductFilters = {
   departments: string[];
   stores: string[];
+  /** Active/upcoming/no-dates statuses to narrow to. Never includes 'expired'
+   * — expired flyers are folded in via `includeExpired`/`expiredOnly`
+   * instead, not as one more entry in this allowlist. */
   statuses: string[];
   /** Show only products the flyer explicitly frames as a deal. */
   onSale: boolean;
+  /** Also show expired flyers, in addition to everything else selected. */
+  includeExpired: boolean;
+  /** Show ONLY expired flyers, overriding everything else in this filter. */
+  expiredOnly: boolean;
 };
 
 export const EMPTY_FILTERS: ProductFilters = {
@@ -182,6 +444,8 @@ export const EMPTY_FILTERS: ProductFilters = {
   stores: [],
   statuses: [],
   onSale: false,
+  includeExpired: false,
+  expiredOnly: false,
 };
 
 export function countActiveFilters(f: ProductFilters): number {
@@ -189,7 +453,9 @@ export function countActiveFilters(f: ProductFilters): number {
     f.departments.length +
     f.stores.length +
     f.statuses.length +
-    (f.onSale ? 1 : 0)
+    (f.onSale ? 1 : 0) +
+    (f.includeExpired ? 1 : 0) +
+    (f.expiredOnly ? 1 : 0)
   );
 }
 
@@ -202,10 +468,14 @@ function filtersToQuery(f: ProductFilters): string[] {
     csv('store', f.stores),
     csv('status', f.statuses),
     f.onSale ? 'sale=1' : '',
+    f.includeExpired ? 'expired=1' : '',
+    f.expiredOnly ? 'expiredOnly=1' : '',
   ];
 }
 
-/** Paginated + text search over every stored product, newest first. */
+/** Paginated + text search over every stored product, grouped by canonical
+ * product (same real-world item across stores) so comparable prices sit
+ * together; `limit`/`offset` paginate groups, not individual products. */
 export function searchProducts(params: {
   q?: string;
   filters?: ProductFilters;
@@ -230,9 +500,16 @@ export type Facet = {value: string; count: number};
 export type FilterFacets = {
   departments: Facet[];
   stores: Facet[];
+  /** Non-expired statuses only — see `expiredCount` for expired. */
   statuses: Facet[];
   /** How many of the (otherwise-filtered) products are on sale. */
   saleCount: number;
+  /** How many expired products match everything else selected — what
+   * "show expired only" would return. */
+  expiredCount: number;
+  /** How many products "show expired with others" would return (the
+   * non-expired baseline plus expired). */
+  expiredIncludedCount: number;
   /** How many products the whole current selection returns. */
   total: number;
 };

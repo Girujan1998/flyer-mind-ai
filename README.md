@@ -74,15 +74,24 @@ the server then does the work deterministically:
   and replies with a templated line + the matching cards. This is what a plain
   keyword search can't do: *"I'm looking for something for a headache"* finds
   Tylenol and Advil even though neither tile says "headache".
-- **`reply`** — for anything that isn't a product request, one short sentence
-  pointing back to what it can do.
+- **`price_insight`** — for a price question ("is $3.99 a good price for
+  strawberries?", "which store has the cheapest chicken?"), the model
+  extracts a `productHint` + `insightType` (+ a `targetPrice` if one was
+  mentioned); the server resolves the product, pulls real numbers from
+  `/price-insight`, and writes the reply from those numbers with a template.
+  The model classifies the question — it never states a price or trend
+  itself, so the agent can't hallucinate a number.
+- **`set_alert`** — "tell me when chicken breast drops below $5/lb" creates a
+  price alert the same deterministic way.
+- **`reply`** — for anything that isn't a product or price question, one
+  short sentence pointing back to what it can do.
 
 Design choices that keep it cheap and predictable:
 
-- **one API call per turn** — no tool round-trips; the "tool" (product search)
-  runs in-process against SQLite
+- **one API call per turn** — no tool round-trips; the "tools" (product
+  search, price lookup) run in-process against SQLite
 - **structured output** (`responseSchema`), `temperature: 0`, no thinking
-  budget, 256-token output cap → ~350–450 tokens per turn
+  budget, ~320-token output cap → ~350–500 tokens per turn
 - last-6-turns of context only, and past result sets collapse to a marker
   (searched terms + restriction) so the model never re-reads card JSON —
   a follow-up like *"just the cheap ones"* still knows the subject
@@ -90,6 +99,35 @@ Design choices that keep it cheap and predictable:
 
 Follow-ups genuinely *filter*: ask for medication, then "for kids", and the
 non-kids items drop out rather than just re-sorting.
+
+### 💰 Price intelligence
+
+Every flyer ever uploaded stays in the database (nothing is pruned), so
+there's a real price history behind every product — the missing piece was
+that the same real-world item could get different `category` text in
+different flyers ("berries" one week, "strawberries" the next), so nothing
+could be compared against its own history.
+
+- **Canonical products** — a second identity layer every product row links to
+  (`canonicalProductId`). Matching is two-stage: a cheap SQL shortlist (same
+  department, category/tag overlap), then one batched Gemini call that looks
+  at the full product **name** to confirm — category text alone is never
+  trusted to auto-link, since a brand-stripped category like `"chips"` covers
+  Lay's, Pringles and a variety box at very different prices. Runs
+  fire-and-forget right after every upload — no added latency.
+- **Deal quality** — today's price compared against the trailing-90-day
+  distribution (`great` / `good` / `average` / `poor`), not just "is there a
+  sale sticker".
+- **Lowest-price tracking**, **retailer comparison**, and **sale-frequency**
+  (median days between on-sale sightings) — all pure SQL aggregates over the
+  same history, no extra Gemini calls.
+- **Price alerts** — an anonymous per-install id (no login) owns alerts
+  created via chat or `POST /alerts`; matching rides the same upload-triggered
+  pass, resolving an alert the moment a sighting satisfies it. In-app only for
+  now — no push notifications yet.
+
+See `server/README.md` for the `/price-history`, `/price-insight`, and
+`/alerts` API and the matching backfill script.
 
 ## Stack
 
@@ -120,10 +158,11 @@ android/  ios/           native projects (committed — bare workflow)
 server/
   src/index.js           Express routes
   src/gemini.js           vision extraction + the chat agent + backfill calls
-  src/db.js               SQLite, search, the wordmatch/headmatch/tagexact UDFs
+  src/db.js               SQLite, search, price history/insight, the wordmatch/headmatch/tagexact UDFs
+  src/canonicalMatch.js   cross-flyer product-identity matching pass
   src/pdf.js  thumbs.js   mupdf page render + per-product crops
   src/departments.js      the fixed 22-aisle list + aisle-word aliases
-  scripts/                text-only backfill for older rows
+  scripts/                text-only backfill for older rows + canonical-product matching
   README.md               full API reference + token-cost notes
 ```
 

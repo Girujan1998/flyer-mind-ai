@@ -1,5 +1,6 @@
 package com.flyermindai
 
+import android.os.Bundle
 import com.facebook.react.ReactActivity
 import com.facebook.react.ReactActivityDelegate
 import com.facebook.react.defaults.DefaultNewArchitectureEntryPoint.fabricEnabled
@@ -19,4 +20,15 @@ class MainActivity : ReactActivity() {
    */
   override fun createReactActivityDelegate(): ReactActivityDelegate =
       DefaultReactActivityDelegate(this, mainComponentName, fabricEnabled)
+
+  /**
+   * The manifest starts this activity on `Theme.App.SplashScreen` (a plain
+   * green background + centered logo — see styles.xml), so that mark is the
+   * very first frame drawn at process start, before any of this code runs.
+   * Swap back to the normal theme here, before RN's root view attaches.
+   */
+  override fun onCreate(savedInstanceState: Bundle?) {
+    setTheme(R.style.AppTheme)
+    super.onCreate(savedInstanceState)
+  }
 }

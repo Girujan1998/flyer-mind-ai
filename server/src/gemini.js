@@ -7,6 +7,8 @@ import {dirname, join} from 'node:path';
 import {fileURLToPath} from 'node:url';
 
 import {DEPARTMENTS, cleanDepartment} from './departments.js';
+import {distinctStores} from './db.js';
+import {normalizeStore} from './stores.js';
 
 const API_BASE = 'https://generativelanguage.googleapis.com/v1beta/models';
 const LOG_FILE = join(
@@ -39,7 +41,8 @@ one page and is preceded by a line like "=== PAGE 3 ===" giving its page number.
 Extract EVERY distinct product across ALL pages shown into one JSON array — be
 exhaustive, do not skip items even on a crowded page, do not stop early.`;
 
-const PROMPT_FIELDS = `Flyer tiles sit close together. Read every field for a product ONLY from text
+function promptFields(year) {
+  return `Flyer tiles sit close together. Read every field for a product ONLY from text
 that is physically inside that product's own tile — never borrow the name,
 price, size or SKU from a neighbouring tile. If a field is not clearly inside
 this tile, leave it empty / 0 rather than guessing.
@@ -97,6 +100,17 @@ For each product:
   cleaning"; paper towels/toilet paper/napkins -> "paper goods";
   shampoo/deodorant/makeup -> "beauty & personal care"; vitamins/medicine/first
   aid -> "health & wellness". Use "other" only when nothing else fits.
+- "flyerValidFrom" / "flyerValidTo": ONLY if THIS PAGE prints the FLYER'S
+  OVERALL price-effective date range — a statement like "Flyer prices
+  effective from Thursday, September 17th to Wednesday, September 23rd,
+  2026", "Valid Aug 28 – Sep 3", "Sale dates 08/28–09/03" — as
+  "YYYY-MM-DD". Take the START/END of that range. If the year isn't printed,
+  use ${year}; but if that puts it more than ~2 months in the FUTURE, use
+  ${year - 1} instead. Put the SAME two values on every product extracted
+  from this page. Do NOT use a single item's own limited-time promo date
+  ("ONE DAY ONLY FRIDAY", a specific deal's cutoff, a coupon expiry) — only
+  the flyer-wide statement, and only when it is clearly printed, never
+  guessed. Empty string for both when this page doesn't state it.
 
 One price shared by two products: if a single price clearly covers TWO OR MORE
 distinct products in the same tile (different product lines — e.g. "Tylenol Extra
@@ -109,6 +123,7 @@ photo and label. If instead it is ONE product line shown as several package shot
 one box enclosing all its shots.
 
 Return [] if there are no products.`;
+}
 
 // --- Flyer-level metadata (store + validity window) --------------------------
 // A separate, cheap call against page 1 only. Kept out of the per-product schema
@@ -158,6 +173,21 @@ function cleanDate(value) {
   return Number.isNaN(d.getTime()) || d.toISOString().slice(0, 10) !== s
     ? ''
     : s;
+}
+
+// Shared by the page-1 flyer-meta call and the per-page fallback below: clean
+// a raw (from, to) date pair, filling a missing `to` from `from` (a one-day
+// sale) and swapping the two if they came back reversed.
+function cleanDateRange(rawFrom, rawTo) {
+  let validFrom = cleanDate(rawFrom);
+  let validTo = cleanDate(rawTo);
+  if (validFrom && !validTo) {
+    validTo = validFrom;
+  }
+  if (validFrom && validTo && validTo < validFrom) {
+    [validFrom, validTo] = [validTo, validFrom];
+  }
+  return {validFrom, validTo};
 }
 
 /**
@@ -214,18 +244,9 @@ export async function extractFlyerMeta(page1Jpeg) {
   try {
     const v = JSON.parse(text) || {};
     const confidence = Number(v.confidence);
-    let validFrom = cleanDate(v.validFrom);
-    let validTo = cleanDate(v.validTo);
-    if (validFrom && !validTo) {
-      validTo = validFrom;
-    }
-    if (validFrom && validTo && validTo < validFrom) {
-      [validFrom, validTo] = [validTo, validFrom];
-    }
     meta = {
-      store: (v.store || '').toString().trim().slice(0, 120),
-      validFrom,
-      validTo,
+      store: normalizeStore(v.store).slice(0, 120),
+      ...cleanDateRange(v.validFrom, v.validTo),
       confidence: isFinite(confidence)
         ? Math.max(0, Math.min(100, Math.round(confidence)))
         : null,
@@ -254,6 +275,8 @@ const RESPONSE_SCHEMA = {
       category: {type: 'STRING'},
       tags: {type: 'ARRAY', items: {type: 'STRING'}},
       department: {type: 'STRING', enum: DEPARTMENTS},
+      flyerValidFrom: {type: 'STRING'},
+      flyerValidTo: {type: 'STRING'},
     },
     required: [
       'page',
@@ -268,6 +291,8 @@ const RESPONSE_SCHEMA = {
       'category',
       'tags',
       'department',
+      'flyerValidFrom',
+      'flyerValidTo',
     ],
   },
 };
@@ -510,7 +535,7 @@ async function extractBatch(batch, apiKey, model) {
     parts.push({text: `=== PAGE ${p.page} ===`});
     parts.push({inline_data: {mime_type: 'image/jpeg', data: p.jpeg}});
   }
-  parts.push({text: PROMPT_FIELDS});
+  parts.push({text: promptFields(new Date().getFullYear())});
 
   const json = await callGemini(
     {
@@ -551,10 +576,20 @@ async function extractBatch(batch, apiKey, model) {
 
   const items = parseProductArray(text, pageNums.join(', '), finishReason);
   const fallbackPage = pageNums[0];
+  // A page's flyer-wide effective-dates statement, if it printed one — the
+  // same cleanup rules as the dedicated page-1 meta call, just sourced from
+  // this page-extraction call instead of a second Gemini request.
+  const pageDatesByPage = new Map();
   const products = items.map(p => {
     let page = parseInt(p.page, 10);
     if (!pageNums.includes(page)) {
       page = fallbackPage;
+    }
+    if (!pageDatesByPage.has(page)) {
+      const range = cleanDateRange(p.flyerValidFrom, p.flyerValidTo);
+      if (range.validFrom && range.validTo) {
+        pageDatesByPage.set(page, range);
+      }
     }
     const priceValue =
       typeof p.priceValue === 'number' ? p.priceValue : Number(p.priceValue);
@@ -585,7 +620,9 @@ async function extractBatch(batch, apiKey, model) {
     };
   });
 
-  return {products, usage: readUsage(json)};
+  const pageDates = [...pageDatesByPage].map(([page, range]) => ({page, ...range}));
+
+  return {products, usage: readUsage(json), pageDates};
 }
 
 async function appendUsageLog(entry) {
@@ -599,12 +636,21 @@ async function appendUsageLog(entry) {
 
 /**
  * @param {Array<{ page: number, jpeg: string }>} pages  page number + base64 JPEG (no data: prefix)
- * @returns {Promise<{ products: Array<object>, usage: object }>}
+ * @param {{ onPage?: (pagesDone: number) => void }} [opts]  `onPage` fires once
+ *   per page as its batch finishes (success or failure) — the upload's
+ *   progress signal.
+ * @returns {Promise<{ products: Array<object>, usage: object, pageDates:
+ *   Array<{ page: number, validFrom: string, validTo: string }> }>}
+ *   `pageDates` is every page that printed the flyer's own effective-dates
+ *   statement (most won't have one) — the fallback source when the
+ *   dedicated page-1 meta call (extractFlyerMeta) comes up empty, at no
+ *   extra Gemini cost since these pages are extracted for products anyway.
  */
-export async function extractFlyer(pages) {
+export async function extractFlyer(pages, {onPage} = {}) {
   // Offline smoke-test path (GEMINI_API_KEY=MOCK) — exercises render -> POST ->
   // crop -> grid without a live key.
   if (process.env.GEMINI_API_KEY === 'MOCK') {
+    pages.forEach(() => onPage?.(1));
     const products = pages.flatMap(p =>
       [
         {
@@ -653,7 +699,7 @@ export async function extractFlyer(pages) {
         box: [j * 300 + 40, 40, j * 300 + 280, 470],
       })),
     );
-    return {products, usage: {calls: 0, mock: true}};
+    return {products, usage: {calls: 0, mock: true}, pageDates: []};
   }
 
   const {apiKey, model} = config();
@@ -662,6 +708,7 @@ export async function extractFlyer(pages) {
   const results = new Array(batches.length);
   const requests = new Array(batches.length);
   const failedPages = [];
+  const pageDatesFound = [];
   let next = 0;
 
   async function worker() {
@@ -676,13 +723,15 @@ export async function extractFlyer(pages) {
 
       let products;
       let usage;
+      let pageDates;
       try {
-        ({products, usage} = await extractBatch(batch, apiKey, model));
+        ({products, usage, pageDates} = await extractBatch(batch, apiKey, model));
       } catch (err) {
         // One bad page shouldn't lose the whole flyer — record it and move on.
         failedPages.push(...batch.map(p => p.page));
         results[i] = [];
         console.warn(`[gemini] pages ${label} FAILED: ${err.message}`);
+        onPage?.(batch.length);
         continue;
       }
       const ms = Date.now() - started;
@@ -694,6 +743,8 @@ export async function extractFlyer(pages) {
         ...usage,
       };
       results[i] = products;
+      pageDatesFound.push(...pageDates);
+      onPage?.(batch.length);
 
       console.log(
         `[gemini] pages ${label}  ` +
@@ -775,6 +826,7 @@ export async function extractFlyer(pages) {
       total,
       failedPages,
     },
+    pageDates: pageDatesFound,
   };
 }
 
@@ -909,6 +961,123 @@ function parseObjectArray(text) {
   return out;
 }
 
+// --- Canonical-product matching (backfill / background pass) ----------------
+// Groups the same real-world product across flyers so price history means
+// anything. Cheap SQL shortlisting (db.js canonicalCandidatesForProduct)
+// happens first; this only runs for the ambiguous leftovers — one Gemini call
+// per batch, ref-keyed like categorizeProducts/assignDepartments above.
+
+const MATCH_SCHEMA = {
+  type: 'ARRAY',
+  items: {
+    type: 'OBJECT',
+    properties: {
+      ref: {type: 'INTEGER'},
+      matchRef: {type: 'INTEGER'},
+      canonicalName: {type: 'STRING'},
+    },
+    required: ['ref', 'matchRef', 'canonicalName'],
+  },
+};
+
+const MATCH_PROMPT = `You are given a numbered list of NEW products, each with a short list of
+CANDIDATE products that might already be the same real-world thing (same
+department, similar category text — the category is brand-stripped, so it is
+only a hint, never proof: "Lay's chips", "Pringles Snack Stacks" and a
+Frito-Lay 16-pack variety box can all say "[category: chips]" while being
+completely different products at completely different prices). For EACH new
+product, decide from its printed NAME whether it is truly the SAME product a
+shopper would recognise as one thing.
+
+- "ref": the new product's number, copied exactly.
+- "matchRef": the candidate number that is the SAME product, or 0 if none of
+  its candidates are.
+  - A PACKAGED / BRANDED product (chips, cereal, soda, cookies, ice cream,
+    detergent...) only matches a candidate of the SAME brand and SAME product
+    line — "Lay's Classic Chips" is NOT "Pringles Snack Stacks" and is NOT a
+    Frito-Lay variety pack, even though all three are "chips". Different pack
+    sizes of the identical brand+line still match.
+  - An unbranded COMMODITY (fresh produce, a cut of meat, a generic staple
+    like milk or eggs) matches on the item itself, brand/retailer-house-brand
+    aside — "2% milk" and "whole milk" both match plain "milk"; a store-brand
+    banana matches any other banana. But "chicken breast" is NOT "chicken
+    thighs", and "cantaloupe" is NOT "avocado" even when both are "[fruit]".
+- "canonicalName": ONLY when matchRef is 0 — a name specific enough that it
+  names only this product, 1-4 lowercase words. For a branded product, KEEP
+  the brand and line ("lay's classic chips", not "chips"). For a commodity,
+  use the plain generic name from the item's actual printed name, not the
+  (possibly too-broad) bracketed category: "Cantaloupes" [fruit] ->
+  "cantaloupe"; "Avocados" [fruit] -> "avocado". "" when matchRef is not 0.
+
+Return exactly one object per new product, nothing else.`;
+
+/**
+ * @param {Array<{ ref: number, name: string, info: string, category: string,
+ *   candidates: Array<{ ref: number, canonicalName: string, category: string }> }>} items
+ * @returns {Promise<{ result: Map<number, {matchRef: number, canonicalName: string}>, usage: object }>}
+ */
+export async function matchCanonicalProducts(items) {
+  if (process.env.GEMINI_API_KEY === 'MOCK') {
+    return {
+      result: new Map(
+        items.map(it => [
+          it.ref,
+          it.candidates.length
+            ? {matchRef: it.candidates[0].ref, canonicalName: ''}
+            : {matchRef: 0, canonicalName: it.category || 'mock item'},
+        ]),
+      ),
+      usage: {mock: true},
+    };
+  }
+
+  const {apiKey, model} = config();
+  const lines = items
+    .map(it => {
+      const head = `${it.ref}. NEW: "${it.name}"${it.info ? ` (${it.info})` : ''} [category: ${it.category || '?'}]`;
+      const cands = it.candidates.length
+        ? '   candidates: ' +
+          it.candidates
+            .map(c => `(${c.ref}) "${c.canonicalName}" [${c.category}]`)
+            .join('  ')
+        : '   candidates: (none)';
+      return `${head}\n${cands}`;
+    })
+    .join('\n');
+
+  const json = await callGemini(
+    {
+      contents: [{parts: [{text: MATCH_PROMPT}, {text: lines}]}],
+      generationConfig: {
+        temperature: 0,
+        responseMimeType: 'application/json',
+        responseSchema: MATCH_SCHEMA,
+        thinkingConfig: {thinkingBudget: 256},
+        maxOutputTokens: Math.min(65536, 200 * items.length + 4000),
+      },
+    },
+    apiKey,
+    model,
+  );
+
+  const candidate = json.candidates?.[0];
+  const text = candidate?.content?.parts?.[0]?.text ?? '';
+
+  const result = new Map();
+  for (const r of parseObjectArray(text)) {
+    const ref = Number(r.ref);
+    if (!Number.isInteger(ref)) {
+      continue;
+    }
+    result.set(ref, {
+      matchRef: Number.isInteger(r.matchRef) ? r.matchRef : 0,
+      canonicalName: cleanCategory(r.canonicalName),
+    });
+  }
+
+  return {result, usage: readUsage(json)};
+}
+
 // --- Department assignment (backfill) ---------------------------------------
 // Coarser than category. Given a list of generic categories (or names), assign
 // each to one fixed store aisle. Cheap: run it over the DISTINCT categories, not
@@ -994,30 +1163,217 @@ export async function assignDepartments(items) {
 // structured object and the server acts on it directly.
 // ---------------------------------------------------------------------------
 
-const CHAT_SYSTEM = `You are the shopping assistant in a grocery-flyer app. Users search products from local flyers.
+function chatSystemPrompt(knownStores) {
+  const storeList = knownStores.length ? knownStores.join(', ') : '(none yet)';
+  return `You are the shopping assistant in a grocery-flyer app. Users search products from local flyers, and can ask about prices.
 
 If the user names a product or category, use action "search":
-- "terms": lowercase search words. START with the plain noun alone ("salmon", "tomato", "milk"), THEN add singular/plural, varieties written in full ("roma tomato", "atlantic salmon"), close synonyms, 2-4 flyer brands. For scope "broad" ALSO add the aisle/category word ("pain relief" for medication); for scope "item" never the parent category ("fish", "meat", "cheese", "produce"). Max 8, <=3 words each.
+- "terms": lowercase search words. START with the plain noun alone ("salmon", "tomato", "milk"), THEN add singular/plural, varieties written in full ("roma tomato", "atlantic salmon"), close synonyms, 2-4 flyer brands. For scope "broad" ALSO add the aisle/category word ("pain relief" for medication); for scope "item" NEVER a parent category — not the item's own umbrella ("banana" is never "fruit", "carrot" is never "vegetable") and not the department ("fish", "meat", "cheese", "produce"). A parent-category word matches every product tagged with it, not just the one asked for. Max 8, <=3 words each.
 - "scope": "item" for a specific thing ("milk" = milk to drink, not milk cake or chocolate bars). "broad" for an aisle/umbrella ("medication", "snacks", "baby products") or "what X products are there" / "anything with X".
+- "department": ONLY when scope is "broad" AND the user is asking for an
+  ENTIRE department/aisle by its common name, not a specific item — "fruits
+  at Walmart", "what snacks do you have", "dairy products" — set this to
+  its exact matching value from DEPARTMENTS below. This browses that whole
+  department directly (precise and complete) instead of guessing search
+  words for it, which either misses most of it or accidentally pulls in
+  unrelated products. Leave "none" for anything item-specific (even if
+  scope is "broad" for an ingredient-style ask like "what has peanuts in
+  it" — there's no single department for that).
 - "must": ONLY when the user restricts it ("for kids", "gluten free", "unsalted") — words a result must ALSO contain, expanded like terms; keep the earlier "terms". "for kids" -> ["child","children","childrens","infant","toddler","junior"]. Else [].
+- "stores": ONLY when the user names specific store(s) to search at ("at No
+  Frills", "at Walmart and Costco") — this LIMITS results to ONLY those
+  stores. Match each name to its correctly-spelled form from KNOWN STORES
+  below, fixing obvious typos/casing ("No Frolls" -> "No Frills", "walmart"
+  -> "Walmart") — pass through as typed if it's not a close match to any of
+  them. One or more is fine. Never invent a store the user didn't name. []
+  if none was named.
 - "intent": what they want, 1-4 words, no verbs — "grapes", "kids medication".
+- "includeExpired": false by default — search only shows currently active and
+  upcoming flyers, never expired ones, e.g. "cheapest corn right now" only
+  looks at what's active or coming up. Set true ONLY when the user explicitly
+  asks about past/historical/expired pricing or flyers — "what was corn last
+  month", "expired flyers for X", "what did milk used to cost".
+- Also use "search" (NOT "price_insight") for a plain "what's the
+  cheapest/lowest price on X" with no historical framing — "cheapest corn
+  right now", "lowest price on milk today", "what's the best price on
+  strawberries". The search results already exclude expired flyers and state
+  the cheapest current match automatically — you don't need to compute
+  anything.
+- "additionalProducts": when the user names MULTIPLE DISTINCT products in one
+  message ("price of tomatoes and chips", "do you have milk, eggs, and
+  bread") — put the FIRST product in terms/scope/must/stores/department/
+  intent as usual, then one entry here per EXTRA product, each shaped
+  exactly like {terms, scope, must, stores, department, intent} above. Max
+  3 extra (4 products total — pick the first 4 named if there are more). Do
+  NOT split one product's own varieties/synonyms into separate entries
+  ("roma or beefsteak tomatoes" is still ONE product); only genuinely
+  different items each get their own entry. [] when there's only one
+  product. If a store applies to EVERY product in the message ("chips at
+  No Frills and Walmart"), repeat it in every entry's own "stores" field —
+  there's no inheritance from the first product.
 
-Otherwise use action "reply" (1-2 sentences). Don't answer general-knowledge questions — say you only help find flyer products.
+If the user names ONE specific product and asks to compare its price ACROSS
+2+ NAMED stores — "is milk cheaper at Walmart or No Frills", "compare eggs
+at Zehrs and Food Basics", "where's cheaper for bread, Walmart or
+Superstore" — use action "compare_stores" instead of "search":
+- "terms"/"scope"/"must"/"intent": describe the ONE product being compared,
+  same style as "search" above — "intent" is just the plain item name
+  ("milk"), never a description of the comparison itself.
+- "department": leave "none" — this is always about one specific item, never
+  a whole-aisle browse.
+- "stores": REQUIRED — the 2+ stores to compare, matched to their correct
+  spelling from KNOWN STORES below. If the user named fewer than 2 stores
+  (or none), use "search" instead — there's nothing to compare yet.
 
-Fill every field; unused ones "" or [].`;
+If the user asks for a total COST/BUDGET ESTIMATE across MULTIPLE items —
+"how much would a taco night cost", "estimate the cost of milk, eggs, and
+bread", "what would a bbq for 6 run me" — use action "budget_estimate":
+- "budgetItems": one entry per item needed, each shaped exactly like an
+  "additionalProducts" entry (terms/scope/must/department/stores/intent
+  — leave each entry's own "stores" AND "department" [] / "none": this is
+  always a list of specific items, never a whole-aisle browse, and each
+  one is priced on its own terms). For a themed ask ("taco night", "a
+  bbq") infer a reasonable ingredient/item list yourself — 4-8 items,
+  don't over-list (protein, shells/buns, toppings, condiments is plenty;
+  skip pantry staples like salt). For an explicit list ("milk, eggs, and
+  bread") use exactly those items. Max 10.
+- "stores": ONLY if the user restricts the WHOLE estimate to named store(s)
+  ("at Walmart", "shopping only at No Frills") — else [] to consider every
+  store.
+
+KNOWN STORES: ${storeList}
+DEPARTMENTS: ${DEPARTMENTS.join(', ')}
+
+If the user asks whether a price is good, how a price compares to before, the
+lowest it's EVER been / historically, which store is USUALLY/typically
+cheaper (a historical comparison, not just what's on sale today), or how
+often something goes on sale — use action "price_insight". This is for
+questions about the PAST or a TREND, never a plain "what's cheapest right
+now" (that's "search" — see above):
+- "productHint": the plain item, 1-4 words, no brand ("strawberries", "chicken breast").
+- "scope": "item" (default — almost always this) means the actual product —
+  "tomatoes" means the produce itself, pooling every variety, never something
+  that merely contains it as an ingredient. "broad" ONLY for an explicit
+  ingredient-style ask — "what products have tomatoes in them", "anything
+  with peanuts" — where a pasta sauce or a snack listing it as an ingredient
+  should also count.
+- "insightType": "deal_quality" (is a price good — incl. "is $X a good price"), "lowest_price" (is THIS/the current price the lowest it's been recently — a yes/no), "when_lowest" (WHEN/what week was the price lowest, or "what's the lowest it's been"), "trend" (how has it changed), "store_compare" (which store is USUALLY cheapest, historically), or "sale_frequency" (how often it goes on sale). Pick the closest one.
+- "targetPrice": the dollar amount they mentioned as a NUMBER (e.g. "$3.99" -> 3.99). 0 if none mentioned.
+
+If the user asks to be told/notified/alerted when something's price drops to
+or below an amount, use action "set_alert":
+- "productHint": same style as above.
+- "targetPrice": the dollar amount as a NUMBER — required. If they gave no
+  number, use action "reply" and ask them for one instead.
+- "comparison": "lt" if they said "under"/"below" a price, else "lte".
+
+If the user asks to see/check their current price alerts ("show my alerts",
+"what am I tracking", "do I have any alerts"), use action "list_alerts". No
+other fields are needed.
+
+If the user asks to cancel/remove/stop/delete a price alert, use action
+"cancel_alert":
+- "productHint": the item, same style as above — "" if they mean ALL of
+  their alerts ("cancel my alerts", "clear all my alerts") rather than one
+  specific product.
+
+Otherwise use action "reply" (1-2 sentences). Don't answer general-knowledge questions — say you only help find and track flyer products. Never claim to
+have done something (cancelled an alert, placed an order, changed a
+setting) unless a dedicated action above actually exists for it and you
+used it.
+
+Fill every field; unused ones "" or [] or 0 or false.`;
+}
+
+// One extra product in a multi-product search ("...and chips") — same shape
+// as the primary terms/scope/must/stores/department/intent fields on
+// CHAT_SCHEMA itself.
+// Gemini's structured-output schema rejects an empty-string enum value, so
+// "not a whole-department browse" needs a real sentinel instead of "".
+const NO_DEPARTMENT = 'none';
+const DEPARTMENT_ENUM = [...DEPARTMENTS, NO_DEPARTMENT];
+
+const PRODUCT_GROUP_SCHEMA = {
+  type: 'OBJECT',
+  properties: {
+    terms: {type: 'ARRAY', items: {type: 'STRING'}},
+    scope: {type: 'STRING', enum: ['item', 'broad']},
+    department: {type: 'STRING', enum: DEPARTMENT_ENUM},
+    must: {type: 'ARRAY', items: {type: 'STRING'}},
+    stores: {type: 'ARRAY', items: {type: 'STRING'}},
+    intent: {type: 'STRING'},
+  },
+  required: ['terms', 'scope', 'department', 'must', 'stores', 'intent'],
+};
 
 const CHAT_SCHEMA = {
   type: 'OBJECT',
   properties: {
-    action: {type: 'STRING', enum: ['search', 'reply']},
+    action: {
+      type: 'STRING',
+      enum: [
+        'search',
+        'compare_stores',
+        'budget_estimate',
+        'price_insight',
+        'set_alert',
+        'list_alerts',
+        'cancel_alert',
+        'reply',
+      ],
+    },
     terms: {type: 'ARRAY', items: {type: 'STRING'}},
     scope: {type: 'STRING', enum: ['item', 'broad']},
+    department: {type: 'STRING', enum: DEPARTMENT_ENUM},
     must: {type: 'ARRAY', items: {type: 'STRING'}},
+    stores: {type: 'ARRAY', items: {type: 'STRING'}},
     intent: {type: 'STRING'},
+    additionalProducts: {type: 'ARRAY', items: PRODUCT_GROUP_SCHEMA},
+    budgetItems: {type: 'ARRAY', items: PRODUCT_GROUP_SCHEMA},
+    includeExpired: {type: 'BOOLEAN'},
+    productHint: {type: 'STRING'},
+    insightType: {
+      type: 'STRING',
+      enum: [
+        'deal_quality',
+        'lowest_price',
+        'when_lowest',
+        'trend',
+        'store_compare',
+        'sale_frequency',
+      ],
+    },
+    targetPrice: {type: 'NUMBER'},
+    comparison: {type: 'STRING', enum: ['lt', 'lte']},
     reply: {type: 'STRING'},
   },
-  required: ['action', 'terms', 'scope', 'must', 'intent', 'reply'],
+  required: [
+    'action',
+    'terms',
+    'scope',
+    'department',
+    'must',
+    'stores',
+    'intent',
+    'additionalProducts',
+    'budgetItems',
+    'includeExpired',
+    'productHint',
+    'insightType',
+    'targetPrice',
+    'comparison',
+    'reply',
+  ],
 };
+
+const INSIGHT_TYPES = [
+  'deal_quality',
+  'lowest_price',
+  'when_lowest',
+  'trend',
+  'store_compare',
+  'sale_frequency',
+];
 
 const GENERIC_REPLY =
   'I can only help you find products in the flyers. Try "find me some grapes" or "I need toilet paper".';
@@ -1052,11 +1408,64 @@ function cleanTerms(value) {
   return out;
 }
 
+// Runs whatever store name(s) Gemini gave back through the same
+// casing/spacing canonicalization applied at flyer ingestion, so "walmart"
+// or "Wal-Mart" match the exact `flyers.store` value regardless of how the
+// model happened to spell it. Doesn't invent matches for genuine typos —
+// that correction is the model's job (it's given the real store list).
+function cleanStores(value) {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return [
+    ...new Set(
+      value
+        .map(s => normalizeStore(s))
+        .filter(s => s && s.length <= 60),
+    ),
+  ].slice(0, 5);
+}
+
+// A store's own name is never a real product search term — if the model
+// ever slips one into "terms"/"must" (it's told not to; that's a separate
+// field), a "broad"-scope wordmatch would match it against ANY product
+// whose NAME happens to embed the store's own name, e.g. a "Walmart
+// Travel" or "Walmart Rewards Mastercard" service tile turning up for a
+// completely unrelated "meat at Walmart" search.
+function stripStoreTerms(terms, storeNamesLower) {
+  return terms.filter(t => !storeNamesLower.has(t));
+}
+
+/** One `additionalProducts` entry -> a clean product group, or null if it has
+ * no usable search terms or department (dropped rather than searched as
+ * empty). */
+function cleanProductGroup(raw, storeNamesLower) {
+  const terms = stripStoreTerms(cleanTerms(raw?.terms), storeNamesLower);
+  const department = DEPARTMENTS.includes(raw?.department) ? raw.department : '';
+  if (!terms.length && !department) {
+    return null;
+  }
+  return {
+    terms,
+    scope: raw?.scope === 'broad' ? 'broad' : 'item',
+    department,
+    must: stripStoreTerms(cleanTerms(raw?.must), storeNamesLower),
+    stores: cleanStores(raw?.stores),
+    intent: String(raw?.intent || '').trim().slice(0, 60),
+  };
+}
+
 /**
  * @param {Array<{ role: 'user'|'assistant', content: string }>} messages
  *   Trimmed recent history, ending with the new user turn.
  * @returns {Promise<
- *   | { kind: 'search', terms: string[], scope: 'item'|'broad', must: string[], intent: string, usage: object }
+ *   | { kind: 'search', groups: {terms: string[], scope: 'item'|'broad', department: string, must: string[], stores: string[], intent: string}[], includeExpired: boolean, usage: object }
+ *   | { kind: 'compare_stores', terms: string[], scope: 'item'|'broad', department: string, must: string[], stores: string[], intent: string, usage: object }
+ *   | { kind: 'budget_estimate', items: {terms: string[], scope: 'item'|'broad', department: string, must: string[], stores: string[], intent: string}[], stores: string[], usage: object }
+ *   | { kind: 'price_insight', productHint: string, scope: 'item'|'broad', insightType: string, targetPrice: number|null, usage: object }
+ *   | { kind: 'set_alert', productHint: string, targetPrice: number, comparison: 'lt'|'lte', usage: object }
+ *   | { kind: 'list_alerts', usage: object }
+ *   | { kind: 'cancel_alert', productHint: string, usage: object }
  *   | { kind: 'reply', text: string, usage: object }
  * >}
  */
@@ -1066,20 +1475,29 @@ export async function chatAgent(messages) {
   if (process.env.GEMINI_API_KEY === 'MOCK') {
     return {
       kind: 'search',
-      terms: cleanTerms(
-        lastUser
-          .toLowerCase()
-          .split(/\s+/)
-          .filter(w => w.length > 2),
-      ),
-      scope: 'item',
-      must: [],
-      intent: lastUser.slice(0, 40),
+      groups: [
+        {
+          terms: cleanTerms(
+            lastUser
+              .toLowerCase()
+              .split(/\s+/)
+              .filter(w => w.length > 2),
+          ),
+          scope: 'item',
+          department: '',
+          must: [],
+          stores: [],
+          intent: lastUser.slice(0, 40),
+        },
+      ],
+      includeExpired: false,
       usage: {mock: true},
     };
   }
 
   const {apiKey, model} = config();
+  const knownStores = distinctStores();
+  const storeNamesLower = new Set(knownStores.map(s => s.toLowerCase()));
 
   const contents = messages.map(m => ({
     role: m.role === 'assistant' ? 'model' : 'user',
@@ -1088,14 +1506,17 @@ export async function chatAgent(messages) {
 
   const json = await callGemini(
     {
-      systemInstruction: {parts: [{text: CHAT_SYSTEM}]},
+      systemInstruction: {parts: [{text: chatSystemPrompt(knownStores)}]},
       contents,
       generationConfig: {
         temperature: 0,
         responseMimeType: 'application/json',
         responseSchema: CHAT_SCHEMA,
         thinkingConfig: {thinkingBudget: 0},
-        maxOutputTokens: 256,
+        // A full "budget_estimate" with up to 10 budgetItems entries is by
+        // far the largest possible response shape here — everything else
+        // (search, price_insight, ...) finishes well under this.
+        maxOutputTokens: 1200,
       },
     },
     apiKey,
@@ -1113,38 +1534,130 @@ export async function chatAgent(messages) {
     // truncated / non-JSON — fall through to the generic reply
   }
 
-  const terms = cleanTerms(parsed.terms);
-  const must = cleanTerms(parsed.must);
+  const terms = stripStoreTerms(cleanTerms(parsed.terms), storeNamesLower);
+  const must = stripStoreTerms(cleanTerms(parsed.must), storeNamesLower);
+  const stores = cleanStores(parsed.stores);
+  const department = DEPARTMENTS.includes(parsed.department) ? parsed.department : '';
   const scope = parsed.scope === 'broad' ? 'broad' : 'item';
-  const result =
-    parsed.action === 'search' && terms.length
-      ? {
-          kind: 'search',
+  const productHint = String(parsed.productHint || '').trim().slice(0, 60);
+  const targetPrice =
+    Number.isFinite(parsed.targetPrice) && parsed.targetPrice > 0
+      ? Math.round(parsed.targetPrice * 100) / 100
+      : null;
+  const budgetItems = Array.isArray(parsed.budgetItems)
+    ? parsed.budgetItems
+        .slice(0, 10)
+        .map(g => cleanProductGroup(g, storeNamesLower))
+        .filter(Boolean)
+    : [];
+  // "compare_stores" needs 2+ stores to mean anything — with fewer, this is
+  // just a normal search for the item, so fall back rather than dead-end.
+  const action =
+    parsed.action === 'compare_stores' && stores.length < 2
+      ? 'search'
+      : parsed.action;
+
+  let result;
+  if (action === 'search' && (terms.length || department)) {
+    const extraGroups = Array.isArray(parsed.additionalProducts)
+      ? parsed.additionalProducts
+          .slice(0, 3)
+          .map(g => cleanProductGroup(g, storeNamesLower))
+          .filter(Boolean)
+      : [];
+    result = {
+      kind: 'search',
+      groups: [
+        {
           terms,
           scope,
+          department,
           must,
+          stores,
           intent: String(parsed.intent || '').slice(0, 60),
-          usage,
-        }
-      : {
-          kind: 'reply',
-          text: (String(parsed.reply || '').trim() || GENERIC_REPLY).slice(
-            0,
-            400,
-          ),
-          usage,
-        };
+        },
+        ...extraGroups,
+      ],
+      includeExpired: !!parsed.includeExpired,
+      usage,
+    };
+  } else if (action === 'compare_stores' && (terms.length || department)) {
+    result = {
+      kind: 'compare_stores',
+      terms,
+      scope,
+      department,
+      must,
+      stores,
+      intent: String(parsed.intent || '').slice(0, 60),
+      usage,
+    };
+  } else if (action === 'budget_estimate' && budgetItems.length) {
+    result = {kind: 'budget_estimate', items: budgetItems, stores, usage};
+  } else if (action === 'price_insight' && productHint) {
+    result = {
+      kind: 'price_insight',
+      productHint,
+      scope,
+      insightType: INSIGHT_TYPES.includes(parsed.insightType)
+        ? parsed.insightType
+        : 'deal_quality',
+      targetPrice,
+      usage,
+    };
+  } else if (action === 'set_alert' && productHint && targetPrice) {
+    result = {
+      kind: 'set_alert',
+      productHint,
+      targetPrice,
+      comparison: parsed.comparison === 'lt' ? 'lt' : 'lte',
+      usage,
+    };
+  } else if (action === 'list_alerts') {
+    result = {kind: 'list_alerts', usage};
+  } else if (action === 'cancel_alert') {
+    result = {kind: 'cancel_alert', productHint, usage};
+  } else {
+    result = {
+      kind: 'reply',
+      text: (String(parsed.reply || '').trim() || GENERIC_REPLY).slice(0, 400),
+      usage,
+    };
+  }
+
+  const detail =
+    result.kind === 'search'
+      ? result.groups
+          .map(
+            g =>
+              `  ${g.scope}  [${g.terms.join(', ')}]` +
+              (g.department ? `  dept:${g.department}` : '') +
+              (g.must.length ? `  must:[${g.must.join(', ')}]` : '') +
+              (g.stores.length ? `  stores:[${g.stores.join(', ')}]` : ''),
+          )
+          .join('  +') + (result.includeExpired ? '  includeExpired' : '')
+      : result.kind === 'compare_stores'
+      ? `  ${result.scope}  [${result.terms.join(', ')}]` +
+        (result.department ? `  dept:${result.department}` : '') +
+        `  stores:[${result.stores.join(', ')}]`
+      : result.kind === 'budget_estimate'
+      ? `  items:[${result.items.map(i => i.intent || i.terms[0]).join(', ')}]` +
+        (result.stores.length ? `  stores:[${result.stores.join(', ')}]` : '')
+      : result.kind === 'price_insight'
+      ? `  ${result.scope}  ${result.insightType}  "${result.productHint}"` +
+        (result.targetPrice ? `  $${result.targetPrice}` : '')
+      : result.kind === 'set_alert'
+      ? `  "${result.productHint}" ${result.comparison} $${result.targetPrice}`
+      : result.kind === 'cancel_alert'
+      ? `  "${result.productHint || 'all'}"`
+      : '';
 
   console.log(
     `[gemini] chat ${result.kind}  turns=${messages.length}  prompt=${n(
       usage.promptTokens,
     )} output=${n(usage.outputTokens)} thoughts=${n(
       usage.thoughtsTokens,
-    )} total=${n(usage.totalTokens)}` +
-      (result.kind === 'search'
-        ? `  ${result.scope}  [${result.terms.join(', ')}]` +
-          (result.must.length ? `  must:[${result.must.join(', ')}]` : '')
-        : ''),
+    )} total=${n(usage.totalTokens)}${detail}`,
   );
 
   await appendUsageLog({
@@ -1153,9 +1666,14 @@ export async function chatAgent(messages) {
     model,
     turns: messages.length,
     kind: result.kind,
-    scope: result.kind === 'search' ? result.scope : undefined,
-    terms: result.kind === 'search' ? result.terms : [],
-    must: result.kind === 'search' ? result.must : [],
+    scope: result.kind === 'price_insight' ? result.scope : undefined,
+    groupCount: result.kind === 'search' ? result.groups.length : undefined,
+    terms: result.kind === 'search' ? result.groups.flatMap(g => g.terms) : [],
+    must: result.kind === 'search' ? result.groups.flatMap(g => g.must) : [],
+    includeExpired: result.kind === 'search' ? result.includeExpired : undefined,
+    productHint: result.productHint,
+    insightType: result.insightType,
+    targetPrice: result.targetPrice,
     ...usage,
   });
 

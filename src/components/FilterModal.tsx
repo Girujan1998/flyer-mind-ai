@@ -41,6 +41,21 @@ function toggle(list: string[], v: string): string[] {
   return list.includes(v) ? list.filter(x => x !== v) : [...list, v];
 }
 
+type ExpiredMode = 'hide' | 'include' | 'only';
+
+const EXPIRED_MODE_OPTIONS: {mode: ExpiredMode; label: string}[] = [
+  {mode: 'hide', label: 'Hide expired products'},
+  {mode: 'include', label: 'Show expired products with others'},
+  {mode: 'only', label: 'Show expired products only'},
+];
+
+function expiredModeOf(f: ProductFilters): ExpiredMode {
+  if (f.expiredOnly) {
+    return 'only';
+  }
+  return f.includeExpired ? 'include' : 'hide';
+}
+
 function FilterModal({
   visible,
   facets,
@@ -161,12 +176,61 @@ function FilterModal({
           </View>
 
           <Text style={styles.hint}>
-            Leave a section untouched to include everything in it.
+            Leave a section untouched to include everything in it — except
+            expired flyers, which are hidden by default. Pick how you'd like to
+            see them above the other sections.
           </Text>
 
           <ScrollView
             style={styles.body}
             contentContainerStyle={styles.bodyContent}>
+            <View style={styles.section}>
+              {EXPIRED_MODE_OPTIONS.map(({mode, label}) => {
+                const on = expiredModeOf(draft) === mode;
+                // "Only" doesn't make sense once a specific status is picked
+                // — it would either be ignored or silently drop that status.
+                const disabled = mode === 'only' && draft.statuses.length > 0;
+                const count =
+                  mode === 'include'
+                    ? shown.expiredIncludedCount ?? 0
+                    : mode === 'only'
+                    ? shown.expiredCount ?? 0
+                    : null;
+                return (
+                  <Pressable
+                    key={mode}
+                    disabled={disabled}
+                    onPress={() =>
+                      setDraft(d => ({
+                        ...d,
+                        includeExpired: mode === 'include',
+                        expiredOnly: mode === 'only',
+                      }))
+                    }
+                    accessibilityRole="radio"
+                    accessibilityState={{checked: on, disabled}}
+                    style={({pressed}) => [
+                      styles.row,
+                      pressed && styles.rowPressed,
+                      disabled && styles.rowDisabled,
+                    ]}>
+                    <View style={[styles.radioBox, on && styles.radioBoxOn]}>
+                      {on ? <View style={styles.radioDot} /> : null}
+                    </View>
+                    <Text style={styles.rowLabel}>{label}</Text>
+                    {count !== null ? (
+                      <Text
+                        style={[
+                          styles.rowCount,
+                          count === 0 && styles.rowZero,
+                        ]}>
+                        {count}
+                      </Text>
+                    ) : null}
+                  </Pressable>
+                );
+              })}
+            </View>
             <View style={styles.section}>
               <Text style={styles.sectionTitle}>Offer</Text>
               <Pressable
@@ -194,7 +258,15 @@ function FilterModal({
               'Status',
               shown.statuses,
               draft.statuses,
-              v => setDraft(d => ({...d, statuses: toggle(d.statuses, v)})),
+              v =>
+                setDraft(d => ({
+                  ...d,
+                  statuses: toggle(d.statuses, v),
+                  // Picking a specific status while "expired only" is on
+                  // means the user wants that status too, not JUST expired.
+                  includeExpired: d.expiredOnly || d.includeExpired,
+                  expiredOnly: false,
+                })),
               v => STATUS_LABEL[v] ?? titleCase(v),
             )}
             {section(
@@ -317,6 +389,22 @@ const makeStyles = (c: Palette) =>
     },
     boxOn: {backgroundColor: c.primary, borderColor: c.primary},
     tick: {width: 8, height: 8, borderRadius: 2, backgroundColor: '#fff'},
+    radioBox: {
+      width: 20,
+      height: 20,
+      borderRadius: 10,
+      borderWidth: 1.5,
+      borderColor: c.border,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    radioBoxOn: {borderColor: c.primary},
+    radioDot: {
+      width: 10,
+      height: 10,
+      borderRadius: 5,
+      backgroundColor: c.primary,
+    },
     rowLabel: {flex: 1, fontSize: 15, color: c.text},
     rowCount: {
       fontSize: 13,
@@ -324,6 +412,7 @@ const makeStyles = (c: Palette) =>
       fontVariant: ['tabular-nums'],
     },
     rowZero: {opacity: 0.4},
+    rowDisabled: {opacity: 0.4},
     footer: {
       flexDirection: 'row',
       gap: spacing.sm,

@@ -1,5 +1,12 @@
 /* eslint-env jest */
 
+// extract.ts imports AsyncStorage at module load (for the anonymous user id) —
+// swap in the package's own jest mock so requireActual below doesn't hit the
+// real native module.
+jest.mock('@react-native-async-storage/async-storage', () =>
+  require('@react-native-async-storage/async-storage/jest/async-storage-mock'),
+);
+
 // Keep the pure helpers real; stub the network calls so mounting the screens in
 // a test doesn't fire real requests (and doesn't update state after teardown).
 jest.mock('./src/api/extract', () => {
