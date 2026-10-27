@@ -1212,6 +1212,35 @@ If the user names a product or category, use action "search":
   No Frills and Walmart"), repeat it in every entry's own "stores" field —
   there's no inheritance from the first product.
 
+If the user names ONE specific product and asks to compare its price ACROSS
+2+ NAMED stores — "is milk cheaper at Walmart or No Frills", "compare eggs
+at Zehrs and Food Basics", "where's cheaper for bread, Walmart or
+Superstore" — use action "compare_stores" instead of "search":
+- "terms"/"scope"/"must"/"intent": describe the ONE product being compared,
+  same style as "search" above — "intent" is just the plain item name
+  ("milk"), never a description of the comparison itself.
+- "department": leave "none" — this is always about one specific item, never
+  a whole-aisle browse.
+- "stores": REQUIRED — the 2+ stores to compare, matched to their correct
+  spelling from KNOWN STORES below. If the user named fewer than 2 stores
+  (or none), use "search" instead — there's nothing to compare yet.
+
+If the user asks for a total COST/BUDGET ESTIMATE across MULTIPLE items —
+"how much would a taco night cost", "estimate the cost of milk, eggs, and
+bread", "what would a bbq for 6 run me" — use action "budget_estimate":
+- "budgetItems": one entry per item needed, each shaped exactly like an
+  "additionalProducts" entry (terms/scope/must/department/stores/intent
+  — leave each entry's own "stores" AND "department" [] / "none": this is
+  always a list of specific items, never a whole-aisle browse, and each
+  one is priced on its own terms). For a themed ask ("taco night", "a
+  bbq") infer a reasonable ingredient/item list yourself — 4-8 items,
+  don't over-list (protein, shells/buns, toppings, condiments is plenty;
+  skip pantry staples like salt). For an explicit list ("milk, eggs, and
+  bread") use exactly those items. Max 10.
+- "stores": ONLY if the user restricts the WHOLE estimate to named store(s)
+  ("at Walmart", "shopping only at No Frills") — else [] to consider every
+  store.
+
 KNOWN STORES: ${storeList}
 DEPARTMENTS: ${DEPARTMENTS.join(', ')}
 
@@ -1282,7 +1311,16 @@ const CHAT_SCHEMA = {
   properties: {
     action: {
       type: 'STRING',
-      enum: ['search', 'price_insight', 'set_alert', 'list_alerts', 'cancel_alert', 'reply'],
+      enum: [
+        'search',
+        'compare_stores',
+        'budget_estimate',
+        'price_insight',
+        'set_alert',
+        'list_alerts',
+        'cancel_alert',
+        'reply',
+      ],
     },
     terms: {type: 'ARRAY', items: {type: 'STRING'}},
     scope: {type: 'STRING', enum: ['item', 'broad']},
@@ -1291,6 +1329,7 @@ const CHAT_SCHEMA = {
     stores: {type: 'ARRAY', items: {type: 'STRING'}},
     intent: {type: 'STRING'},
     additionalProducts: {type: 'ARRAY', items: PRODUCT_GROUP_SCHEMA},
+    budgetItems: {type: 'ARRAY', items: PRODUCT_GROUP_SCHEMA},
     includeExpired: {type: 'BOOLEAN'},
     productHint: {type: 'STRING'},
     insightType: {
@@ -1317,6 +1356,7 @@ const CHAT_SCHEMA = {
     'stores',
     'intent',
     'additionalProducts',
+    'budgetItems',
     'includeExpired',
     'productHint',
     'insightType',
@@ -1420,6 +1460,8 @@ function cleanProductGroup(raw, storeNamesLower) {
  *   Trimmed recent history, ending with the new user turn.
  * @returns {Promise<
  *   | { kind: 'search', groups: {terms: string[], scope: 'item'|'broad', department: string, must: string[], stores: string[], intent: string}[], includeExpired: boolean, usage: object }
+ *   | { kind: 'compare_stores', terms: string[], scope: 'item'|'broad', department: string, must: string[], stores: string[], intent: string, usage: object }
+ *   | { kind: 'budget_estimate', items: {terms: string[], scope: 'item'|'broad', department: string, must: string[], stores: string[], intent: string}[], stores: string[], usage: object }
  *   | { kind: 'price_insight', productHint: string, scope: 'item'|'broad', insightType: string, targetPrice: number|null, usage: object }
  *   | { kind: 'set_alert', productHint: string, targetPrice: number, comparison: 'lt'|'lte', usage: object }
  *   | { kind: 'list_alerts', usage: object }
@@ -1471,7 +1513,10 @@ export async function chatAgent(messages) {
         responseMimeType: 'application/json',
         responseSchema: CHAT_SCHEMA,
         thinkingConfig: {thinkingBudget: 0},
-        maxOutputTokens: 320,
+        // A full "budget_estimate" with up to 10 budgetItems entries is by
+        // far the largest possible response shape here — everything else
+        // (search, price_insight, ...) finishes well under this.
+        maxOutputTokens: 1200,
       },
     },
     apiKey,
@@ -1499,9 +1544,21 @@ export async function chatAgent(messages) {
     Number.isFinite(parsed.targetPrice) && parsed.targetPrice > 0
       ? Math.round(parsed.targetPrice * 100) / 100
       : null;
+  const budgetItems = Array.isArray(parsed.budgetItems)
+    ? parsed.budgetItems
+        .slice(0, 10)
+        .map(g => cleanProductGroup(g, storeNamesLower))
+        .filter(Boolean)
+    : [];
+  // "compare_stores" needs 2+ stores to mean anything — with fewer, this is
+  // just a normal search for the item, so fall back rather than dead-end.
+  const action =
+    parsed.action === 'compare_stores' && stores.length < 2
+      ? 'search'
+      : parsed.action;
 
   let result;
-  if (parsed.action === 'search' && (terms.length || department)) {
+  if (action === 'search' && (terms.length || department)) {
     const extraGroups = Array.isArray(parsed.additionalProducts)
       ? parsed.additionalProducts
           .slice(0, 3)
@@ -1524,7 +1581,20 @@ export async function chatAgent(messages) {
       includeExpired: !!parsed.includeExpired,
       usage,
     };
-  } else if (parsed.action === 'price_insight' && productHint) {
+  } else if (action === 'compare_stores' && (terms.length || department)) {
+    result = {
+      kind: 'compare_stores',
+      terms,
+      scope,
+      department,
+      must,
+      stores,
+      intent: String(parsed.intent || '').slice(0, 60),
+      usage,
+    };
+  } else if (action === 'budget_estimate' && budgetItems.length) {
+    result = {kind: 'budget_estimate', items: budgetItems, stores, usage};
+  } else if (action === 'price_insight' && productHint) {
     result = {
       kind: 'price_insight',
       productHint,
@@ -1535,7 +1605,7 @@ export async function chatAgent(messages) {
       targetPrice,
       usage,
     };
-  } else if (parsed.action === 'set_alert' && productHint && targetPrice) {
+  } else if (action === 'set_alert' && productHint && targetPrice) {
     result = {
       kind: 'set_alert',
       productHint,
@@ -1543,9 +1613,9 @@ export async function chatAgent(messages) {
       comparison: parsed.comparison === 'lt' ? 'lt' : 'lte',
       usage,
     };
-  } else if (parsed.action === 'list_alerts') {
+  } else if (action === 'list_alerts') {
     result = {kind: 'list_alerts', usage};
-  } else if (parsed.action === 'cancel_alert') {
+  } else if (action === 'cancel_alert') {
     result = {kind: 'cancel_alert', productHint, usage};
   } else {
     result = {
@@ -1566,6 +1636,13 @@ export async function chatAgent(messages) {
               (g.stores.length ? `  stores:[${g.stores.join(', ')}]` : ''),
           )
           .join('  +') + (result.includeExpired ? '  includeExpired' : '')
+      : result.kind === 'compare_stores'
+      ? `  ${result.scope}  [${result.terms.join(', ')}]` +
+        (result.department ? `  dept:${result.department}` : '') +
+        `  stores:[${result.stores.join(', ')}]`
+      : result.kind === 'budget_estimate'
+      ? `  items:[${result.items.map(i => i.intent || i.terms[0]).join(', ')}]` +
+        (result.stores.length ? `  stores:[${result.stores.join(', ')}]` : '')
       : result.kind === 'price_insight'
       ? `  ${result.scope}  ${result.insightType}  "${result.productHint}"` +
         (result.targetPrice ? `  $${result.targetPrice}` : '')

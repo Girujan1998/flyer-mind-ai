@@ -598,6 +598,9 @@ function cheapestPriceNote(products, today) {
 // that group's own reply sentence, reusing the same rules as a single-product
 // search: only state a cheapest-price note for an "item"-scope, non-expired
 // group, since a "broad" aisle group spans unrelated products.
+// "snacks & candy" -> "Snacks & Candy" for the reply text.
+const titleCase = s => s.replace(/\b\w/g, c => c.toUpperCase());
+
 function runSearchGroup(group, baseUrl, includeExpired, limit) {
   const {products, pages, terms, must, total} = searchProductsExpanded(
     group.terms,
@@ -614,19 +617,218 @@ function runSearchGroup(group, baseUrl, includeExpired, limit) {
   const label = group.intent || group.department || terms[0] || 'that';
   const storeNote = group.stores.length ? ` at ${group.stores.join(' and ')}` : '';
   const expiredNote = includeExpired ? ', including expired flyers' : '';
+  const countNote = total > products.length ? ` (showing ${products.length})` : '';
   const priceNote =
     products.length && group.scope === 'item' && !includeExpired
       ? cheapestPriceNote(products, todayIso())
       : '';
-  const reply = products.length
-    ? `Found ${total} match${total === 1 ? '' : 'es'} for "${label}"${storeNote}${expiredNote}` +
-      (total > products.length ? ` (showing ${products.length}).` : '.') +
-      priceNote
-    : `I couldn't find anything for "${label}"${storeNote} in the flyers right now.` +
+  // A department match (group.department set) returns EVERY product in that
+  // aisle, not just ones matching "label" — e.g. "chips" can pull in all of
+  // Snacks & Candy, cookies and chocolate bars included. Say so plainly
+  // instead of implying all `total` results are "chips" matches.
+  const reply = !products.length
+    ? `I couldn't find anything for "${label}"${storeNote} in the flyers right now.` +
       (terms.length
         ? ` I searched: ${terms.join(', ')}${must.length ? `, filtered to: ${must.join(', ')}` : ''}.`
-        : '');
+        : '')
+    : group.department
+    ? `Browsing all of "${titleCase(group.department)}"${storeNote}${expiredNote} — ` +
+      `${total} item${total === 1 ? '' : 's'} in that aisle${countNote}, ` +
+      `not filtered down to just "${label}".`
+    : `Found ${total} match${total === 1 ? '' : 'es'} for "${label}"${storeNote}${expiredNote}${countNote}.` +
+      priceNote;
   return {label, products, pages, terms, must, total, reply};
+}
+
+// Dedupe flyer pages across several {pages: [...]} results (multiple search
+// groups, multiple budget items, ...) that likely share a source flyer.
+function mergePages(resultsWithPages) {
+  const pages = [];
+  const seen = new Set();
+  for (const r of resultsWithPages) {
+    for (const p of r.pages) {
+      const key = `${p.flyerId}:${p.page}`;
+      if (seen.has(key)) {
+        continue;
+      }
+      seen.add(key);
+      pages.push(p);
+    }
+  }
+  return pages;
+}
+
+// "compare_stores" chat turn — one specific item, priced at each of the 2+
+// named stores. Every number in the reply is the actual cheapest current
+// listing at that store, never a Gemini guess.
+function runStoreCompare(agent, baseUrl) {
+  // department is deliberately never passed through here: a department
+  // match returns EVERY product in that aisle (inclusion isn't term-based
+  // at all — see runSearchGroup's own comment on this), so "cheapest
+  // ground beef" could silently become "cheapest thing in Meat & Seafood",
+  // e.g. pork chops. A comparison is always about the one named item.
+  const {products, pages, terms} = searchProductsExpanded(agent.terms, baseUrl, {
+    limit: 50,
+    must: agent.must,
+    broad: agent.scope === 'broad',
+    includeExpired: false,
+    stores: agent.stores,
+  });
+  const label = agent.intent || agent.department || terms[0] || 'that';
+
+  // Cheapest current listing per requested store (undefined where there's
+  // no match at all).
+  const byStore = new Map();
+  for (const p of products) {
+    if (!Number.isFinite(p.priceValue)) {
+      continue;
+    }
+    const cur = byStore.get(p.store);
+    if (!cur || p.priceValue < cur.priceValue) {
+      byStore.set(p.store, p);
+    }
+  }
+
+  const rows = agent.stores.map(store => ({store, product: byStore.get(store) || null}));
+  const found = rows.filter(r => r.product);
+  const missing = rows.filter(r => !r.product).map(r => r.store);
+  const missingNote = missing.length
+    ? ` No current listing at ${missing.join(' or ')}.`
+    : '';
+
+  let reply;
+  if (!found.length) {
+    reply = `I couldn't find "${label}" at ${agent.stores.join(' or ')} right now.`;
+  } else if (found.length === 1) {
+    reply = `"${label}" is ${found[0].product.price} at ${found[0].store}.${missingNote}`;
+  } else {
+    const sorted = [...found].sort((a, b) => a.product.priceValue - b.product.priceValue);
+    const cheapest = sorted[0];
+    const rest = sorted.slice(1);
+    const tied = rest.length && rest[0].product.priceValue === cheapest.product.priceValue;
+    reply = tied
+      ? `"${label}" is the same price at ${sorted
+          .map(r => `${r.store} (${r.product.price})`)
+          .join(' and ')}.${missingNote}`
+      : `"${label}" is cheaper at ${cheapest.store} — ${cheapest.product.price} vs ` +
+        `${rest.map(r => `${r.product.price} at ${r.store}`).join(', ')}.${missingNote}`;
+  }
+
+  return {
+    reply,
+    groups: found.length
+      ? [
+          {
+            label,
+            products: found.map(r => r.product),
+            terms,
+            must: agent.must,
+            total: found.length,
+          },
+        ]
+      : [],
+    pages,
+  };
+}
+
+// "budget_estimate" chat turn — sums each item's cheapest current listing
+// (the best-price-per-item "split across stores" total) and, separately,
+// checks whether any single store carries every item, for a one-stop total.
+// Every dollar figure comes straight from the matched listings.
+function runBudgetEstimate(agent, baseUrl) {
+  const lines = agent.items.map(item => {
+    // department is deliberately never passed through here — same reason
+    // as runStoreCompare: each list entry is one specific item, and a
+    // department match would price the CHEAPEST THING IN THAT AISLE
+    // instead, e.g. "ground beef" silently pricing out as pork chops.
+    const {products, pages, terms} = searchProductsExpanded(item.terms, baseUrl, {
+      limit: 50,
+      must: item.must,
+      broad: item.scope === 'broad',
+      includeExpired: false,
+      stores: agent.stores,
+    });
+    const label = item.intent || item.department || terms[0] || 'item';
+    const priced = products.filter(p => Number.isFinite(p.priceValue));
+
+    const byStore = new Map();
+    for (const p of priced) {
+      const cur = byStore.get(p.store);
+      if (!cur || p.priceValue < cur.priceValue) {
+        byStore.set(p.store, p);
+      }
+    }
+    const cheapest = priced.length
+      ? priced.reduce((a, b) => (b.priceValue < a.priceValue ? b : a))
+      : null;
+
+    return {label, cheapest, byStore, products: priced, pages};
+  });
+
+  const found = lines.filter(l => l.cheapest);
+  const missing = lines.filter(l => !l.cheapest).map(l => l.label);
+  const fmt = v => `$${v.toFixed(2)}`;
+
+  let reply;
+  if (!found.length) {
+    reply = "I couldn't find current prices for any of those items.";
+  } else {
+    const splitTotal = found.reduce((sum, l) => sum + l.cheapest.priceValue, 0);
+    const itemList = found.map(l => l.label).join(', ');
+
+    // A store only counts toward a one-stop total if it carries EVERY
+    // found item — otherwise the trip wouldn't actually cover the list.
+    const allStores = new Set();
+    for (const l of found) {
+      for (const store of l.byStore.keys()) {
+        allStores.add(store);
+      }
+    }
+    const storeTotals = [...allStores]
+      .map(store => {
+        let total = 0;
+        for (const l of found) {
+          const p = l.byStore.get(store);
+          if (!p) {
+            return null;
+          }
+          total += p.priceValue;
+        }
+        return {store, total};
+      })
+      .filter(Boolean)
+      .sort((a, b) => a.total - b.total);
+
+    const storeNote = storeTotals.length
+      ? ` Shopping one store: ${storeTotals[0].store} has everything for ` +
+        `${fmt(storeTotals[0].total)}` +
+        (storeTotals.length > 1
+          ? `, vs ${storeTotals
+              .slice(1)
+              .map(s => `${fmt(s.total)} at ${s.store}`)
+              .join(', ')}.`
+          : '.')
+      : ' No single store currently carries all of these.';
+    const missingNote = missing.length
+      ? ` (Couldn't find current prices for: ${missing.join(', ')}.)`
+      : '';
+
+    reply =
+      `Splitting across stores for the best price on each item: ${fmt(splitTotal)} ` +
+      `(${itemList}).${storeNote}${missingNote}`;
+  }
+
+  return {
+    reply,
+    groups: found.map(l => ({
+      label: l.label,
+      products: l.products.slice(0, 6),
+      terms: [],
+      must: [],
+      total: l.products.length,
+    })),
+    pages: mergePages(found),
+  };
 }
 
 // "2026-09-03" -> "Sep 3" — for naming the flyer week a price happened in.
@@ -754,8 +956,9 @@ function composePriceInsightReply(agent, insight) {
  *
  * The Chat-tab agent. One Gemini call turns the latest user turn into a
  * search (one group per distinct product asked about — "tomatoes and
- * chips" is two groups), a price question, a new price alert, or a short
- * reply. Non-search turns return `groups: []`.
+ * chips" is two groups), a same-item store comparison, a multi-item budget
+ * estimate, a price question, a new price alert, or a short reply. Turns
+ * with no products to show return `groups: []`.
  */
 app.post('/chat', express.json({limit: '32kb'}), async (req, res) => {
   try {
@@ -794,19 +997,6 @@ app.post('/chat', express.json({limit: '32kb'}), async (req, res) => {
         runSearchGroup(g, baseUrl, agent.includeExpired, limit),
       );
 
-      const pages = [];
-      const seenPages = new Set();
-      for (const r of results) {
-        for (const p of r.pages) {
-          const key = `${p.flyerId}:${p.page}`;
-          if (seenPages.has(key)) {
-            continue;
-          }
-          seenPages.add(key);
-          pages.push(p);
-        }
-      }
-
       return res.json({
         reply: results.map(r => r.reply).join('\n\n'),
         groups: results.map(({label, products, terms, must, total}) => ({
@@ -816,8 +1006,20 @@ app.post('/chat', express.json({limit: '32kb'}), async (req, res) => {
           must,
           total,
         })),
-        pages,
+        pages: mergePages(results),
       });
+    }
+
+    if (agent.kind === 'compare_stores') {
+      const baseUrl = baseUrlOf(req);
+      const {reply, groups, pages} = runStoreCompare(agent, baseUrl);
+      return res.json({reply, groups, pages});
+    }
+
+    if (agent.kind === 'budget_estimate') {
+      const baseUrl = baseUrlOf(req);
+      const {reply, groups, pages} = runBudgetEstimate(agent, baseUrl);
+      return res.json({reply, groups, pages});
     }
 
     if (agent.kind === 'price_insight') {
